@@ -8,7 +8,7 @@ import cli
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-c", "--checkpoint", type=str, default="/root/Qwen3-0.6B", help="模型路径")
+    parser.add_argument("-c", "--checkpoint", type=str, default="/root/autodl-tmp/Qwen3-0.6B", help="模型路径")
     args = parser.parse_args()
 
     cli.print_header("Qwen3 对话助手")
@@ -18,7 +18,8 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.checkpoint,
         torch_dtype="auto",
-        device_map="auto"
+        device_map="auto",
+        attn_implementation="flash_attention_2"
     ).eval()
 
     cli.print_success("模型加载完成！")
