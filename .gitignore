@@ -54,3 +54,5 @@ Thumbs.db
 # Misc
 *.tmp
 *.temp
+
+/data_example

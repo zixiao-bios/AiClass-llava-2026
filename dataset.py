@@ -15,9 +15,15 @@ def load_image_from_url(url: str, timeout: int = 10) -> Image.Image:
 
 
 class SA1BDataset(IterableDataset):
-    """流式数据集，配合 DataLoader 使用"""
+    """流式数据集，支持 train/val 划分，配合 DataLoader 使用
     
-    def __init__(self, transform=None):
+    Args:
+        split: 'train' 或 'val'，决定返回哪部分数据
+        val_ratio: 验证集比例，默认 0.05（5%）
+        transform: 图像预处理变换
+    """
+    
+    def __init__(self, split='train', val_ratio=0.05, transform=None):
         self.ds = MsDataset.load(
             'Tongyi-DataEngine/SA1B-Dense-Caption', 
             subset_name='default', 
@@ -25,17 +31,34 @@ class SA1BDataset(IterableDataset):
             trust_remote_code=True,
             use_streaming=True
         )
+        assert split in ('train', 'val'), f"split 必须是 'train' 或 'val'，收到: {split}"
+        self.split = split
+        self.val_every = int(1 / val_ratio)  # 每隔多少条取一条做验证
         self.transform = transform
+    
+    def _is_val_sample(self, idx):
+        """每 val_every 条取一条作为验证集"""
+        return idx % self.val_every == 0
     
     def __iter__(self):
         # 获取 worker 信息，用于数据分片
         worker_info = torch.utils.data.get_worker_info()
         
+        sample_idx = 0  # 过滤后的独立计数器，用于 worker 分片
         for idx, data in enumerate(self.ds):
-            # 多 worker 时，每个 worker 只处理属于自己的数据
+            # 先根据 split 决定保留/跳过
+            is_val = self._is_val_sample(idx)
+            if self.split == 'train' and is_val:
+                continue   # 训练时跳过验证样本
+            if self.split == 'val' and not is_val:
+                continue   # 验证时跳过训练样本
+            
+            # 多 worker 时，用独立计数器分片，避免与 split 过滤冲突
             if worker_info is not None:
-                if idx % worker_info.num_workers != worker_info.id:
+                if sample_idx % worker_info.num_workers != worker_info.id:
+                    sample_idx += 1
                     continue  # 跳过不属于本 worker 的数据
+            sample_idx += 1
             
             try:
                 image = load_image_from_url(data['url'])
@@ -56,87 +79,3 @@ class SA1BDataset(IterableDataset):
                 # 跳过加载失败的样本
                 print(f"跳过样本: {e}")
                 continue
-
-
-if __name__ == '__main__':
-    from torchvision import transforms
-    import time
-    
-    # 定义图像预处理
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        # transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-        #                    std=[0.229, 0.224, 0.225])
-    ])
-    
-    # 性能测试配置
-    TEST_SAMPLES = 5000  # 测试样本数
-    BATCH_SIZE = 8
-    NUM_WORKERS = 2
-    REPORT_INTERVAL = 100  # 每隔多少样本输出一次进度
-    
-    # 创建数据集和 DataLoader
-    dataset = SA1BDataset(transform=transform)
-    dataloader = DataLoader(
-        dataset, 
-        batch_size=BATCH_SIZE,
-        num_workers=NUM_WORKERS,
-        prefetch_factor=2   # 预取
-    )
-    
-    print("=" * 60)
-    print("数据集性能测试")
-    print("=" * 60)
-    print(f"目标样本数: {TEST_SAMPLES}")
-    print(f"Batch Size: {BATCH_SIZE}")
-    print(f"Num Workers: {NUM_WORKERS}")
-    print(f"每 {REPORT_INTERVAL} 样本输出进度")
-    print("=" * 60 + "\n")
-    
-    # 性能测试
-    total_samples = 0
-    total_batches = 0
-    start_time = time.time()
-    last_report_samples = 0
-    last_report_time = start_time
-    
-    for batch in dataloader:
-        batch_size_actual = batch['image'].shape[0]
-        total_samples += batch_size_actual
-        total_batches += 1
-        
-        # 定期输出进度报告
-        if total_samples - last_report_samples >= REPORT_INTERVAL:
-            elapsed = time.time() - start_time
-            interval_time = time.time() - last_report_time
-            interval_samples = total_samples - last_report_samples
-            
-            current_speed = total_samples / elapsed
-            interval_speed = interval_samples / interval_time
-            
-            print(f"[进度] {total_samples:>5}/{TEST_SAMPLES} 样本 | "
-                  f"耗时: {elapsed:>6.1f}s | "
-                  f"平均: {current_speed:>5.1f} 样本/s | "
-                  f"当前: {interval_speed:>5.1f} 样本/s")
-            
-            last_report_samples = total_samples
-            last_report_time = time.time()
-        
-        if total_samples >= TEST_SAMPLES:
-            break
-    
-    total_time = time.time() - start_time
-    
-    # 输出性能报告
-    print("\n" + "=" * 60)
-    print("性能测试报告")
-    print("=" * 60)
-    print(f"总样本数: {total_samples}")
-    print(f"总批次数: {total_batches}")
-    print(f"总耗时: {total_time:.2f} 秒")
-    print("-" * 60)
-    print(f"平均吞吐量: {total_samples / total_time:.2f} 样本/秒")
-    print(f"平均批次处理时间: {total_time / total_batches:.4f} 秒/批次")
-    print(f"平均每样本耗时: {total_time / total_samples * 1000:.2f} 毫秒/样本")
-    print("=" * 60)

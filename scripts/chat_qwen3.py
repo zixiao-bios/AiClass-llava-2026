@@ -1,9 +1,13 @@
 #!/usr/bin/env python
 """Qwen3 命令行交互脚本"""
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import argparse
 from transformers import AutoModelForCausalLM, AutoTokenizer
-import cli
+from utils import cli
 
 
 def main():
