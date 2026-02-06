@@ -56,3 +56,5 @@ Thumbs.db
 *.temp
 
 /data_example
+*.png
+*.jpg
