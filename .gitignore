@@ -58,3 +58,5 @@ Thumbs.db
 /data_example
 *.png
 *.jpg
+checkpoints/
+runs/
