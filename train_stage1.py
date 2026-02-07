@@ -2,7 +2,7 @@
 """
 LLaVA Stage 1 训练脚本 —— 模态对齐阶段
 
-冻结 CLIP 视觉编码器和 Qwen3 LLM，仅训练线性投影层，
+冻结 CLIP 视觉编码器和 Qwen3 LLM，仅训练 MLP 投影层，
 使视觉特征对齐到语言模型的嵌入空间。
 
 使用 SA1B-Dense-Caption 训练集的前 10 万条样本。
@@ -111,11 +111,19 @@ def build_collate_fn(tokenizer, max_text_len: int):
     """
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
-    def collate_fn(batch):
-        # ---- 图像 ----
+    def collate_fn(batch: list[dict]) -> dict[str, torch.Tensor]:
+        """将一个 batch 的样本整理为模型可接受的张量字典。
+
+        Args:
+            batch: DataLoader 采样的样本列表，每个元素含 'image' 和 'global_caption'。
+
+        Returns:
+            dict: 包含 'pixel_values' [B,3,224,224]、'input_ids' [B,T]、'labels' [B,T]。
+        """
+        # ---- 图像：堆叠为一个 batch 张量 ----
         pixel_values = torch.stack([sample['image'] for sample in batch])
 
-        # ---- 构造 QA 对话 ----
+        # ---- 构造 QA 对话：每条样本随机选一条指令作为 Q ----
         all_input_ids = []
         all_labels = []
 
@@ -130,11 +138,11 @@ def build_collate_fn(tokenizer, max_text_len: int):
             all_input_ids.append(input_ids)
             all_labels.append(labels)
 
-        # ---- Padding ----
+        # ---- Padding：将不等长序列填充到相同长度 ----
         return {
             "pixel_values": pixel_values,
             "input_ids": pad_sequences(all_input_ids, pad_value=pad_id),
-            "labels": pad_sequences(all_labels, pad_value=-100),
+            "labels": pad_sequences(all_labels, pad_value=-100),  # -100 表示 padding 位置不计算 loss
         }
 
     return collate_fn
@@ -182,6 +190,15 @@ def evaluate(model, eval_dataloader, device, max_batches: int = 0):
 
 
 def main():
+    """训练主函数。
+
+    完整流程：
+    1. 加载模型（CLIP + Qwen3），冻结 CLIP 和 LLM，仅投影层可训练
+    2. 加载训练集和评估集（SA1B-Dense-Caption）
+    3. 设置 AdamW 优化器 + Cosine 学习率调度（含 warmup）
+    4. 训练循环：前向 → 反向 → 更新，定期日志/评估/保存
+    5. 训练结束后做全量评估并保存最终权重
+    """
     args = parse_args()
 
     cli.print_header("LLaVA Stage 1 训练")
@@ -197,6 +214,17 @@ def main():
         vision_tower_path=CLIP_PATH,
         llm_path=LLM_PATH,
     )
+
+    # Stage 1 策略：冻结 vision_tower + LLM，只训练 projection
+    for param in model.vision_tower.parameters():
+        param.requires_grad = False
+    for param in model.llm.parameters():
+        param.requires_grad = False
+    
+    # 梯度检查点：前向传播时不保存中间激活值，反向时重新计算
+    # 以额外的计算量换取大幅显存节省（LLM 参数量大，中间激活值占显存很多）
+    model.llm.gradient_checkpointing_enable()
+
     model.to(device)
 
     # 统计参数
@@ -268,9 +296,12 @@ def main():
 
     # ── TensorBoard ───────────────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = os.path.join(LOG_DIR, f"{timestamp}_{args.run_name}")
+    run_tag = f"{timestamp}_{args.run_name}"
+    run_dir = os.path.join(LOG_DIR, run_tag)
+    save_dir = os.path.join(SAVE_DIR, run_tag)
     writer = SummaryWriter(run_dir)
     cli.print_info(f"TensorBoard 日志目录: {run_dir}")
+    cli.print_info(f"Checkpoint 保存目录: {save_dir}")
     cli.print_info("启动查看: tensorboard --logdir runs")
     cli.print_divider()
 
@@ -318,14 +349,14 @@ def main():
 
             cli.print_divider()
 
-        # 前向 + 反向
+        # 前向 + 反向（使用 bf16 混合精度以节省显存和加速计算）
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             loss = model(pixel_values, input_ids, labels)
 
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
-        optimizer.zero_grad()
+        loss.backward()        # 反向传播，梯度仅流向 projection 层（其余已冻结）
+        optimizer.step()       # 更新 projection 层参数
+        scheduler.step()       # 更新学习率（cosine schedule）
+        optimizer.zero_grad()  # 清空梯度
 
         # 统计
         loss_val = loss.item()
@@ -372,8 +403,8 @@ def main():
 
         # 定期保存
         if global_step % args.save_interval == 0:
-            os.makedirs(SAVE_DIR, exist_ok=True)
-            ckpt_path = os.path.join(SAVE_DIR, f"stage1_projection_step{global_step}.pt")
+            os.makedirs(save_dir, exist_ok=True)
+            ckpt_path = os.path.join(save_dir, f"stage1_projection_step{global_step}.pt")
             torch.save(model.projection.state_dict(), ckpt_path)
             tqdm.write(f"  ✓ Checkpoint 已保存: {ckpt_path}")
 
@@ -398,8 +429,8 @@ def main():
     cli.print_kv("总耗时", f"{total_time:.1f}s ({total_time / 60:.1f}min)")
 
     # 保存最终权重
-    os.makedirs(SAVE_DIR, exist_ok=True)
-    final_path = os.path.join(SAVE_DIR, "stage1_projection.pt")
+    os.makedirs(save_dir, exist_ok=True)
+    final_path = os.path.join(save_dir, "stage1_projection.pt")
     torch.save(model.projection.state_dict(), final_path)
     cli.print_success(f"最终权重已保存: {final_path}")
 

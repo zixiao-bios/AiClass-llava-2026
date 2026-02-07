@@ -46,15 +46,15 @@ def build_qa_ids(
     a_ids = tokenizer.encode(answer, add_special_tokens=False)
     a_ids = a_ids + [tokenizer.eos_token_id]
 
-    # 拼接并截断
+    # 拼接 Q + A 并截断到 max_len（超长时只截断 A 的尾部）
     input_ids = q_ids + a_ids
     if len(input_ids) > max_len:
         input_ids = input_ids[:max_len]
-        a_len = max(0, max_len - len(q_ids))
+        a_len = max(0, max_len - len(q_ids))  # 截断后 A 部分的实际长度
     else:
         a_len = len(a_ids)
 
-    # Labels: Q = -100, A = token ids
+    # 构造 labels：Q 部分设为 -100（CrossEntropy 忽略），A 部分保留 token id
     q_len = len(input_ids) - a_len
     labels = [-100] * q_len + input_ids[q_len:]
 

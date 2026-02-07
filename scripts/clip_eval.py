@@ -16,6 +16,7 @@ import torch
 from torchvision import transforms
 from PIL import Image
 from modelscope.models import Model
+from transformers import BertTokenizer
 
 # 使用非交互式后端，避免在无 GUI 环境报错
 import matplotlib
@@ -42,19 +43,19 @@ PREPROCESS = transforms.Compose([
 def load_model():
     """加载中文 CLIP 模型。
 
-    从 ModelScope 预训练权重加载 CLIP 模型，提取其中的
-    clip_model 和 tokenizer。
+    从 ModelScope 预训练权重加载 CLIP 模型，使用 HuggingFace
+    BertTokenizer 加载同目录下的 vocab.txt 作为分词器。
 
     Returns:
         tuple: (clip_model, tokenizer, device)
             - clip_model: CLIP 视觉-语言模型
-            - tokenizer: 文本分词器
+            - tokenizer: BertTokenizer 实例
             - device: 'cuda' 或 'cpu'
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     wrapper = Model.from_pretrained(MODEL_PATH)
     clip = wrapper.clip_model.to(device).eval()
-    tokenizer = wrapper.tokenizer
+    tokenizer = BertTokenizer.from_pretrained(MODEL_PATH)
     print(f"模型已加载  设备: {device}")
     return clip, tokenizer, device
 
@@ -76,22 +77,6 @@ def load_images():
     return images, filenames
 
 
-def tokenize(text, tokenizer):
-    """将文本转换为模型输入的 token id 张量。
-
-    手动添加 [CLS] 和 [SEP] 标记，适配 BERT 风格的 tokenizer。
-
-    Args:
-        text: 输入文本字符串。
-        tokenizer: BERT tokenizer 实例。
-
-    Returns:
-        torch.Tensor: shape 为 (1, seq_len) 的 token id 张量。
-    """
-    tokens = ["[CLS]"] + tokenizer.tokenize(text) + ["[SEP]"]
-    return torch.tensor([tokenizer.convert_tokens_to_ids(tokens)])
-
-
 @torch.no_grad()
 def compute_scores(text, images, clip, tokenizer, device):
     """计算一段文本与所有图片的余弦相似度。
@@ -107,7 +92,8 @@ def compute_scores(text, images, clip, tokenizer, device):
         list[float]: 每张图片与文本的余弦相似度分数。
     """
     # 编码文本（只需一次），L2 归一化
-    text_feat = clip.encode_text(tokenize(text, tokenizer).to(device))
+    text_ids = tokenizer.encode(text, return_tensors="pt").to(device)
+    text_feat = clip.encode_text(text_ids)
     text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
 
     # 分批编码图片，避免显存溢出
@@ -134,19 +120,19 @@ def draw_chart(scores, filenames, text):
         filenames: 图片文件名列表。
         text: 查询文本（显示在图表标题中）。
     """
-    # 按分数降序排列
+    # 按分数降序排列，使最相关的图片排在最前
     paired = sorted(zip(filenames, scores), key=lambda x: x[1], reverse=True)
     names = [p[0] for p in paired]
     vals = [p[1] for p in paired]
 
-    # 计算分数范围，用于颜色映射
+    # 计算分数范围，用于将分数线性映射到 [0,1] 的颜色区间
     min_s, max_s = min(vals), max(vals)
-    rng = max_s - min_s or 1.0
+    rng = max_s - min_s or 1.0  # 避免分母为 0
 
     fig, ax = plt.subplots(figsize=(10, max(8, len(names) * 0.25)))
     bars = ax.barh(range(len(names)), vals, height=0.7)
 
-    # 根据分数映射 RdYlGn 色阶（红→黄→绿）
+    # 根据归一化分数映射 RdYlGn 色阶（低分红色→中间黄色→高分绿色）
     for bar, v in zip(bars, vals):
         bar.set_color(plt.cm.RdYlGn((v - min_s) / rng))
 

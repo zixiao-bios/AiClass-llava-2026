@@ -27,6 +27,13 @@ REPORT_INTERVAL = 100
 
 
 def main():
+    """数据集吞吐量测试主函数。
+
+    流程：
+    1. 创建 SA1BDataset 和 DataLoader
+    2. 迭代指定数量的样本，定期报告吞吐量
+    3. 输出最终性能报告（样本/秒、每批耗时、每样本耗时）
+    """
     cli.print_header("数据集性能测试")
 
     transform = transforms.Compose([
@@ -56,10 +63,11 @@ def main():
     last_report_time = start_time
 
     for batch in dataloader:
-        batch_size_actual = batch['image'].shape[0]
+        batch_size_actual = batch['image'].shape[0]  # 最后一个 batch 可能不满
         total_samples += batch_size_actual
         total_batches += 1
 
+        # 每处理 REPORT_INTERVAL 个样本输出一次中间报告
         if total_samples - last_report_samples >= REPORT_INTERVAL:
             elapsed = time.time() - start_time
             interval_time = time.time() - last_report_time

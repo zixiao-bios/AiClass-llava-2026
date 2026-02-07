@@ -70,6 +70,7 @@ def main():
             messages.append({"role": "user", "content": user_input})
 
             # 使用 chat template 将多轮对话格式化为模型输入
+            # Qwen3 的 chat template 会自动添加 <|im_start|>/<|im_end|> 等特殊标记
             text = tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
@@ -78,7 +79,7 @@ def main():
             cli.print_thinking()
             outputs = model.generate(**inputs, max_new_tokens=512)
 
-            # 截取模型生成部分（去掉 prompt），解码为文本
+            # 截取模型新生成的部分（跳过输入 prompt 的 token），解码为文本
             response = tokenizer.decode(
                 outputs[0][inputs["input_ids"].shape[1]:],
                 skip_special_tokens=True

@@ -18,9 +18,20 @@ from utils import cli
 
 
 def load_image_from_url(url: str, timeout: int = 10) -> Image.Image:
-    """从 URL 下载并加载图片。"""
+    """从 URL 下载并加载图片，转为 RGB 格式。
+
+    Args:
+        url: 图片的 HTTP/HTTPS 地址。
+        timeout: 请求超时时间（秒），默认 10。
+
+    Returns:
+        RGB 格式的 PIL Image 对象。
+
+    Raises:
+        requests.HTTPError: HTTP 请求失败时抛出。
+    """
     response = requests.get(url, timeout=timeout)
-    response.raise_for_status()
+    response.raise_for_status()  # 非 2xx 状态码会抛出异常
     return Image.open(BytesIO(response.content)).convert('RGB')
 
 
@@ -42,15 +53,27 @@ class SA1BDataset(Dataset):
         self.transform = transform
         cli.print_success(f"数据集就绪，共 {len(self.df):,} 条数据")
 
-    def __len__(self):
+    def __len__(self) -> int:
+        """返回数据集的样本总数。"""
         return len(self.df)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> dict:
+        """根据索引获取一条样本（图片 + 全局描述）。
+
+        Args:
+            idx: 样本索引。
+
+        Returns:
+            dict: 包含以下字段:
+                - 'image': PIL Image 或经过 transform 后的 Tensor。
+                - 'global_caption': 图片的全局文字描述（str）。
+        """
         row = self.df.iloc[idx]
         image = load_image_from_url(row['url'])
         if self.transform:
             image = self.transform(image)
 
+        # cap_seg 字段可能是字符串形式的字典，需用 ast.literal_eval 安全解析
         cap_seg = row['cap_seg']
         if isinstance(cap_seg, str):
             cap_seg = ast.literal_eval(cap_seg)

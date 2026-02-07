@@ -1,13 +1,13 @@
 """
-LLaVA Stage 1 模型定义
+LLaVA 多模态模型定义
 
-实现模态对齐架构：冻结 CLIP 视觉编码器和 Qwen3 LLM，
-仅训练中间的线性投影层，将视觉特征映射到语言模型嵌入空间。
+三组件架构：CLIP 视觉编码器 + MLP 投影层 + Qwen3 语言模型。
+各组件作为公开属性暴露，冻结/训练策略由外部代码控制。
 
 架构:
-    Image → CLIPVisionTower (frozen) → [B, 197, 768]
-          → Projection (trainable)   → [B, 197, 1024]
-          → concat with text embeds  → Qwen3 (frozen) → loss
+    Image → CLIPVisionTower → [B, 197, 768]
+          → MultimodalProjection (2-layer MLP) → [B, 197, 1024]
+          → concat with text embeds → Qwen3 → loss
 """
 
 import torch
@@ -40,17 +40,17 @@ class CLIPVisionTower(nn.Module):
         self.hidden_size = self.visual.conv1.out_channels        # 768
         self.num_patches = self.visual.positional_embedding.shape[0]  # 197
 
-        # 冻结所有参数
-        for param in self.visual.parameters():
-            param.requires_grad = False
-
-    @torch.no_grad()
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """提取所有 patch token 的视觉特征。
 
-        与原版 CLIP forward 的区别：
-        - 不做 CLS 池化（保留全部 197 个 token）
-        - 不做 proj 投影（保留 768 维，交给后续 Projection 层处理）
+        重写了原版 CLIP VisualTransformer 的 forward，原因：
+        1. 原版做 CLS 池化，只返回 [B, proj_dim] 的单一向量（用于图文匹配），
+           丢失了空间信息。LLaVA 需要所有 197 个 token 的特征 [B, 197, 768]，
+           让 LLM 能感知图像不同区域的内容。
+        2. 原版最后会乘 self.proj 矩阵，将特征投影到 CLIP 图文共享嵌入空间。
+           但 LLaVA 需要映射到 LLM 的嵌入空间，这由后续的 MultimodalProjection
+           完成，因此这里跳过 proj，直接返回 Transformer 输出的原始特征。
+        原版 CLIP 代码：https://github.com/modelscope/modelscope/blob/master/modelscope/models/multi_modal/clip/model.py
 
         Args:
             pixel_values: 预处理后的图像张量，shape [B, 3, 224, 224]。
@@ -86,45 +86,74 @@ class CLIPVisionTower(nn.Module):
         return x
 
 
-class LlavaForCausalLM(nn.Module):
-    """LLaVA Stage 1 多模态模型。
+class MultimodalProjection(nn.Module):
+    """多模态投影层：2 层 MLP，将视觉特征映射到语言模型嵌入空间。
 
-    组合冻结的视觉编码器、可训练的投影层和冻结的语言模型，
-    实现 image captioning 训练。
+    采用 LLaVA 1.5 的设计：Linear → GELU → Linear。
+
+    Args:
+        vision_hidden_size: 视觉编码器输出维度（如 768）。
+        llm_hidden_size: 语言模型嵌入维度（如 1024）。
+
+    Attributes:
+        linear_1: 第一层线性变换 (vision_hidden_size → llm_hidden_size)。
+        act: GELU 激活函数。
+        linear_2: 第二层线性变换 (llm_hidden_size → llm_hidden_size)。
+    """
+
+    def __init__(self, vision_hidden_size: int, llm_hidden_size: int):
+        super().__init__()
+        self.linear_1 = nn.Linear(vision_hidden_size, llm_hidden_size)
+        self.act = nn.GELU()
+        self.linear_2 = nn.Linear(llm_hidden_size, llm_hidden_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """前向传播。
+
+        Args:
+            x: 视觉特征 [B, N, vision_hidden_size]。
+
+        Returns:
+            投影后的特征 [B, N, llm_hidden_size]。
+        """
+        return self.linear_2(self.act(self.linear_1(x)))
+
+
+class LlavaForCausalLM(nn.Module):
+    """LLaVA 多模态模型。
+
+    组合视觉编码器、投影层和语言模型，实现图文理解与生成。
+    三个核心组件作为公开属性暴露，冻结/训练策略由外部代码控制。
 
     Args:
         vision_tower_path: CLIP 模型路径。
         llm_path: Qwen3 语言模型路径。
 
     Attributes:
-        vision_tower: 冻结的 CLIP 视觉编码器。
-        projection: 可训练的线性投影层 (768 → 1024)。
-        llm: 冻结的 Qwen3 语言模型。
+        vision_tower: CLIP 视觉编码器。
+        projection: 2 层 MLP 投影层 (768 → 1024)。
+        llm: Qwen3 语言模型。
         tokenizer: Qwen3 分词器。
     """
 
     def __init__(self, vision_tower_path: str, llm_path: str):
         super().__init__()
 
-        # 1. 视觉编码器（冻结）
+        # 1. 视觉编码器
         self.vision_tower = CLIPVisionTower(vision_tower_path)
 
-        # 2. 语言模型（冻结）
+        # 2. 语言模型
         self.tokenizer = AutoTokenizer.from_pretrained(llm_path)
         self.llm = AutoModelForCausalLM.from_pretrained(
             llm_path,
             torch_dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
         )
-        for param in self.llm.parameters():
-            param.requires_grad = False
-        # 梯度检查点：用重计算换显存，减少 LLM 中间激活值的存储开销
-        self.llm.gradient_checkpointing_enable()
 
-        # 3. 投影层（可训练）—— 唯一需要训练的部分
+        # 3. 投影层（2 层 MLP）
         vision_hidden_size = self.vision_tower.hidden_size   # 768
         llm_hidden_size = self.llm.config.hidden_size        # 1024
-        self.projection = nn.Linear(vision_hidden_size, llm_hidden_size)
+        self.projection = MultimodalProjection(vision_hidden_size, llm_hidden_size)
 
     def forward(
         self,
@@ -132,18 +161,18 @@ class LlavaForCausalLM(nn.Module):
         input_ids: torch.Tensor,
         labels: torch.Tensor,
     ) -> torch.Tensor:
-        """前向传播，计算 caption 生成的交叉熵损失。
+        """前向传播，计算 next-token prediction 的交叉熵损失。
 
         流程：
         1. 视觉编码：图像 → CLIP → 所有 patch 特征
-        2. 投影：768 维 → 1024 维
-        3. 文本嵌入：caption token → Qwen3 embedding
+        2. 投影：768 维 → 1024 维（2 层 MLP）
+        3. 文本嵌入：token → Qwen3 embedding
         4. 拼接：[visual_embeds, text_embeds]
-        5. 送入 LLM 计算 next-token prediction loss
+        5. 送入 LLM 计算 loss
 
         Args:
             pixel_values: 预处理图像 [B, 3, 224, 224]。
-            input_ids: caption 的 token ID [B, T]。
+            input_ids: 文本的 token ID [B, T]。
             labels: 训练标签 [B, T]（padding 位置为 -100）。
 
         Returns:
@@ -152,7 +181,7 @@ class LlavaForCausalLM(nn.Module):
         # ---- 视觉分支 ----
         visual_features = self.vision_tower(pixel_values)        # [B, 197, 768]
         visual_embeds = self.projection(visual_features.to(      # [B, 197, 1024]
-            self.projection.weight.dtype
+            self.projection.linear_1.weight.dtype
         ))
 
         # ---- 文本分支 ----
@@ -192,7 +221,7 @@ class LlavaForCausalLM(nn.Module):
     ) -> torch.Tensor:
         """根据图像和对话 token 生成回复。
 
-        用于推理阶段：将视觉 embedding 与对话历史 embedding 拼接后，
+        将视觉 embedding 与对话历史 embedding 拼接后，
         调用 LLM 的 generate 方法自回归生成文本。
 
         Args:
@@ -207,7 +236,7 @@ class LlavaForCausalLM(nn.Module):
         # ---- 视觉分支 ----
         visual_features = self.vision_tower(pixel_values)        # [1, 197, 768]
         visual_embeds = self.projection(visual_features.to(      # [1, 197, 1024]
-            self.projection.weight.dtype
+            self.projection.linear_1.weight.dtype
         ))
 
         # ---- 文本分支 ----

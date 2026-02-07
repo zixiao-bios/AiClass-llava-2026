@@ -106,6 +106,13 @@ def decode_response(output_ids: torch.Tensor, tokenizer) -> str:
 
 
 def main():
+    """交互式评估主函数。
+
+    流程：
+    1. 加载 LLaVA 模型并恢复训练好的投影层权重
+    2. 进入交互循环：支持图片 URL 加载、多轮问答、对话清空
+    3. 每轮问答：将对话历史编码 → 拼接视觉特征 → 生成回复
+    """
     args = parse_args()
 
     cli.print_header("LLaVA 交互式评估", width=50)
@@ -120,9 +127,6 @@ def main():
         vision_tower_path=args.clip_path,
         llm_path=args.llm_path,
     )
-
-    # 关闭梯度检查点（推理不需要，且与 generate 不兼容）
-    model.llm.gradient_checkpointing_disable()
 
     # 加载训练好的投影层权重
     cli.print_loading(args.checkpoint, label="加载权重")
@@ -198,10 +202,10 @@ def main():
         # 追加用户消息
         messages.append({"role": "user", "content": user_input})
 
-        # 编码全部对话历史
+        # 将全部对话历史（含多轮）编码为 token 序列
         input_ids = build_prompt_ids(messages, tokenizer).to(device)
 
-        # 生成
+        # 模型推理：视觉特征 + 对话 token → 自回归生成回复
         cli.print_thinking("生成中...")
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             output_ids = model.generate(
