@@ -1,14 +1,19 @@
 # AiClass-LLaVA-2026
 
-多模态大模型课程实践项目 —— 实现 LLaVA Stage 1 模态对齐训练，将 CLIP 视觉特征对齐到 Qwen3 语言模型的嵌入空间。
+多模态大模型课程实践项目 —— 实现 LLaVA 两阶段训练，将 CLIP 视觉特征对齐到 Qwen3 语言模型的嵌入空间，并通过指令微调使模型具备多轮图文对话能力。
 
 ## 项目架构
 
 ```
-训练流程：
+Stage 1 — 模态对齐（仅训练 Projection）:
   Image → CLIP ViT-B/16 (frozen) → [B, 197, 768]
         → Linear Projection (trainable) → [B, 197, 1024]
-        → concat with text embeds → Qwen3-0.6B (frozen) → loss
+        → concat with text embeds → Qwen3-0.6B (frozen) → caption loss
+
+Stage 2 — 指令微调（训练 Projection + LLM）:
+  Image → CLIP ViT-B/16 (frozen) → [B, 197, 768]
+        → Linear Projection (trainable) → [B, 197, 1024]
+        → concat with text embeds → Qwen3-0.6B (trainable) → conversation loss
 
 推理流程：
   Image + 对话历史 → 视觉特征 + 文本 token → Qwen3 自回归生成回复
@@ -21,15 +26,16 @@ AiClass-llava-2026/
 ├── README.md                  # 项目说明文档
 ├── .gitignore                 # Git 忽略规则
 │
-├── model.py                   # LLaVA Stage 1 模型定义（CLIP + Projection + Qwen3）
-├── dataset.py                 # SA1B 本地数据集模块（从 parquet 文件加载）
+├── model.py                   # LLaVA 模型定义（CLIP + Projection + Qwen3）
+├── dataset.py                 # 数据集模块（SA1BDataset + CogVLMSFTDataset）
 ├── train_stage1.py            # Stage 1 训练脚本（模态对齐）
+├── train_stage2.py            # Stage 2 训练脚本（指令微调）
 ├── eval_llava.py              # 交互式图文问答评估脚本
 │
 ├── utils/                     # 工具包
 │   ├── __init__.py
 │   ├── cli.py                 # 终端彩色输出 / 对话 UI 工具函数
-│   └── process.py             # QA 对话构造 / token 序列 padding 等数据处理工具
+│   └── process.py             # 图像预处理 / QA 构造 / 多轮对话构造 / padding
 │
 ├── scripts/                   # 辅助脚本
 │   ├── chat_qwen3.py          # Qwen3 命令行多轮对话
@@ -38,7 +44,7 @@ AiClass-llava-2026/
 │   ├── dataset_test.py        # 数据集吞吐量性能测试
 │   └── save_examples.py       # 下载并保存示例数据到本地
 │
-├── checkpoints/               # 训练保存的投影层权重（自动生成）
+├── checkpoints/               # 训练保存的模型权重（自动生成）
 ├── runs/                      # TensorBoard 日志（自动生成）
 └── data_example/              # 示例数据（由 save_examples.py 生成）
     ├── 0000.jpg ~ 0099.jpg    # 示例图片
@@ -108,17 +114,28 @@ git clone https://www.modelscope.cn/iic/multi-modal_clip-vit-base-patch16_zh.git
 
 ### 3. 下载数据集
 
-- 所有数据都来源于：https://modelscope.cn/datasets/Tongyi-DataEngine/SA1B-Dense-Caption/summary
-- 下载前 10 个分片，作为 stage1 的训练集
+- Stage 1 所有数据都来源于：https://modelscope.cn/datasets/Tongyi-DataEngine/SA1B-Dense-Caption/summary
+- 下载前 10 个分片，作为 Stage 1 的训练集
 
 ```bash
 modelscope download --dataset 'Tongyi-DataEngine/SA1B-Dense-Caption' --include 'data/train-000*' --local_dir '/root/autodl-tmp/data_stage1_train'
 ```
 
-- 第 11 个分片，作为 stage1 的验证集
+- 第 11 个分片，作为 Stage 1 的验证集
 
 ```bash
 modelscope download --dataset 'Tongyi-DataEngine/SA1B-Dense-Caption' --include 'data/train-0010*' --local_dir '/root/autodl-tmp/data_stage1_eval'
+```
+
+- Stage 2 数据集（CogVLM-SFT-311K，含单轮 + 多轮对话，共约 13 万条）
+
+```bash
+# 下载
+modelscope download --dataset 'ZhipuAI/CogVLM-SFT-311K' --local_dir '/root/autodl-tmp/data_stage2'
+
+# 解压
+cd /root/autodl-tmp/data_stage2
+unzip CogVLM-SFT-311K.zip
 ```
 
 ### 4. 进入项目目录，验证环境
@@ -141,27 +158,37 @@ python scripts/clip_eval.py
 
 ### 5. 训练
 
-1. stage1
+1. Stage 1 — 模态对齐
 
 ```bash
 python train_stage1.py
 ```
 
+2. Stage 2 — 指令微调（需指定 Stage 1 训练好的 projection 权重）
+
+```bash
+python train_stage2.py --projection_path your/path/to/ckpt
+```
 
 ## 核心模块
 
-### `model.py` — LLaVA Stage 1 模型
+### `model.py` — LLaVA 多模态模型
 
-- **CLIPVisionTower**：包装 ModelScope 中文 CLIP ViT-B/16，输出所有 patch token 特征 `[B, 197, 768]`
-- **LlavaForCausalLM**：组合冻结的 CLIP + 可训练的线性投影层 (768→1024) + 冻结的 Qwen3 LLM
-- 支持 `forward`（训练，计算 caption loss）和 `generate`（推理，自回归生成）
+- **CLIPVisionTower**：包装 ModelScope 中文 CLIP ViT-B/16，输出所有 patch token 特征 `[B, 197, 768]`；前向传播强制使用 float32，避免 bf16 下 `nn.MultiheadAttention` 数值不稳定
+- **MultimodalProjection**：2 层 MLP（Linear → GELU → Linear），将视觉特征从 768 维映射到 LLM 的 1024 维嵌入空间
+- **LlavaForCausalLM**：组合 CLIP + Projection + Qwen3，支持 `forward`（训练，计算 next-token loss）和 `generate`（推理，自回归生成）
 
-### `dataset.py` — SA1B 本地数据集
+### `dataset.py` — 数据集模块
 
-- 从本地 parquet 文件加载 [SA1B-Dense-Caption](https://modelscope.cn/datasets/Tongyi-DataEngine/SA1B-Dense-Caption) 数据
-- 自动扫描 `{data_root}/data/*.parquet` 并合并
-- 按需从 URL 下载图片，返回图片 + 全局描述
-- 兼容 `DataLoader` 多 worker 并行加载
+- **SA1BDataset**（Stage 1）：从本地 parquet 文件加载 [SA1B-Dense-Caption](https://modelscope.cn/datasets/Tongyi-DataEngine/SA1B-Dense-Caption) 数据，按需从 URL 下载图片，返回图片 + 全局描述
+- **CogVLMSFTDataset**（Stage 2）：从本地图片 + JSON 标签加载 CogVLM-SFT-311K 对话数据，支持单轮和多轮对话；通过 `split` 和 `eval_ratio` 参数从同一目录划分训练集和评估集
+
+### `utils/process.py` — 数据处理工具
+
+- **IMAGE_TRANSFORM**：CLIP 标准图像预处理流水线（Resize → CenterCrop → ToTensor → Normalize），Stage 1/2 共用
+- **build_qa_ids**（Stage 1）：将指令 + 回答构造为单轮 QA 对话 token 序列，Q 部分掩码，A 部分计算 loss
+- **build_conversation_ids**（Stage 2）：将多轮对话构造为 token 序列，逐轮增量编码完整前缀再做差值取新增 token，user 轮掩码，assistant 轮计算 loss
+- **pad_sequences**：将不等长 token 序列右侧 padding 到相同长度
 
 ### `train_stage1.py` — Stage 1 训练
 
@@ -171,10 +198,13 @@ python train_stage1.py
 - AdamW 优化器 + Cosine 学习率调度（含 warmup）
 - 支持定期评估、checkpoint 保存、TensorBoard 日志
 
-```bash
-python train_stage1.py
-python train_stage1.py --batch_size 16 --lr 1e-3 --eval_interval 200
-```
+### `train_stage2.py` — Stage 2 训练
+
+- 加载 Stage 1 训练好的 Projection 权重，冻结 CLIP，训练 Projection + LLM
+- 使用 CogVLM-SFT-311K 单轮 + 多轮对话数据（约 13 万条），自动划分训练集和评估集
+- 多轮对话格式：user 轮掩码，仅在 assistant 回复部分计算 loss
+- 梯度裁剪（max_norm=1.0）防止梯度爆炸
+- 保存完整模型 state_dict（含 CLIP + Projection + LLM）
 
 ### `eval_llava.py` — 交互式评估
 

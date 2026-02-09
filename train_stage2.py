@@ -1,21 +1,20 @@
 #!/usr/bin/env python
 """
-LLaVA Stage 1 训练脚本 —— 模态对齐阶段
+LLaVA Stage 2 训练脚本 —— 指令微调阶段
 
-冻结 CLIP 视觉编码器和 Qwen3 LLM，仅训练 MLP 投影层，
-使视觉特征对齐到语言模型的嵌入空间。
+加载 Stage 1 预训练好的模型权重（CLIP + Projection + Qwen3），
+全参数微调，使模型学会根据图像进行多轮对话。
 
-使用 SA1B-Dense-Caption 训练集的前 10 万条样本。
+使用 CogVLM-SFT-311K 的单轮 + 多轮对话数据（共约 13 万条）。
 
 用法:
-    python train_stage1.py
-    python train_stage1.py --batch_size 16 --lr 1e-3
+    python train_stage2.py
+    python train_stage2.py --batch_size 4 --lr 2e-5
 """
 
 import os
 import time
 import math
-import random
 import argparse
 from datetime import datetime
 
@@ -25,18 +24,18 @@ from transformers import get_cosine_schedule_with_warmup
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
 
-from dataset import SA1BDataset
+from dataset import CogVLMSFTDataset
 from model import LlavaForCausalLM
 from utils import cli
-from utils.process import IMAGE_TRANSFORM, build_qa_ids, pad_sequences
+from utils.process import IMAGE_TRANSFORM, build_conversation_ids, pad_sequences
 
 # ── 默认配置 ──────────────────────────────────────────────────────────
 CLIP_PATH = "/root/autodl-tmp/multi-modal_clip-vit-base-patch16_zh"
 LLM_PATH = "/root/autodl-tmp/Qwen3-0.6B"
-DATA_ROOT = "/root/autodl-tmp/data_stage1_train"
-EVAL_DATA_ROOT = "/root/autodl-tmp/data_stage1_eval"
-MAX_SAMPLES = 100_000          # 训练集前 10 万条
-MAX_TEXT_LEN = 128             # caption 最大 token 数
+PROJECTION_PATH = ""              # Stage 1 训练好的 projection 权重路径（.pt 文件）
+DATA_ROOT = "/root/autodl-tmp/data_stage2/CogVLM-SFT-311K"
+MAX_SAMPLES = -1                  # 全部数据
+MAX_TEXT_LEN = 512                # 多轮对话最大 token 数
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 SAVE_DIR = os.path.join(PROJECT_ROOT, "checkpoints")
@@ -45,54 +44,51 @@ LOG_DIR = os.path.join(PROJECT_ROOT, "runs")
 
 def parse_args():
     """解析命令行参数。"""
-    parser = argparse.ArgumentParser(description="LLaVA Stage 1 训练")
+    parser = argparse.ArgumentParser(description="LLaVA Stage 2 训练")
+    parser.add_argument("--clip_path", type=str, default=CLIP_PATH,
+                        help=f"CLIP 模型路径（默认 {CLIP_PATH}）")
+    parser.add_argument("--llm_path", type=str, default=LLM_PATH,
+                        help=f"LLM 模型路径（默认 {LLM_PATH}）")
+    parser.add_argument("--projection_path", type=str, default=PROJECTION_PATH,
+                        help="Stage 1 训练好的 projection 权重路径（.pt 文件）")
     parser.add_argument("--data_root", type=str, default=DATA_ROOT,
-                        help=f"训练数据集根目录（默认 {DATA_ROOT}）")
-    parser.add_argument("--eval_data_root", type=str, default=EVAL_DATA_ROOT,
-                        help=f"评估数据集根目录（默认 {EVAL_DATA_ROOT}）")
-    parser.add_argument("--batch_size", type=int, default=16,
-                        help="每批样本数（默认 16）")
-    parser.add_argument("--lr", type=float, default=2e-3,
-                        help="学习率（默认 2e-3）")
+                        help=f"数据集根目录（默认 {DATA_ROOT}）")
+    parser.add_argument("--eval_ratio", type=float, default=0.02,
+                        help="评估集占总数据的比例（默认 0.02，即 2%%）")
+    parser.add_argument("--batch_size", type=int, default=4,
+                        help="每批样本数（默认 4，全参数微调显存较大）")
+    parser.add_argument("--lr", type=float, default=2e-5,
+                        help="学习率（默认 2e-5）")
     parser.add_argument("--num_workers", type=int, default=8,
                         help="DataLoader worker 数（默认 8）")
     parser.add_argument("--log_interval", type=int, default=10,
                         help="每隔多少步打印日志（默认 10）")
-    parser.add_argument("--eval_interval", type=int, default=200,
-                        help="每隔多少步评估一次（默认 200）")
-    parser.add_argument("--eval_samples", type=int, default=500,
-                        help="每次评估最多使用的样本数（默认 500，0 表示用全部）")
-    parser.add_argument("--save_interval", type=int, default=1000,
-                        help="每隔多少步保存 checkpoint（默认 1000）")
+    parser.add_argument("--eval_interval", type=int, default=500,
+                        help="每隔多少步评估一次（默认 500）")
+    parser.add_argument("--eval_samples", type=int, default=200,
+                        help="每次评估最多使用的样本数（默认 200，0 表示用全部）")
+    parser.add_argument("--save_interval", type=int, default=2000,
+                        help="每隔多少步保存 checkpoint（默认 2000）")
     parser.add_argument("--warmup_ratio", type=float, default=0.03,
                         help="学习率预热比例（默认 0.03）")
-    parser.add_argument("--run_name", type=str, default="stage1",
-                        help="本次运行名称，用于 TensorBoard 日志目录命名（默认 stage1）")
+    parser.add_argument("--run_name", type=str, default="stage2",
+                        help="本次运行名称，用于 TensorBoard 日志目录命名（默认 stage2）")
     return parser.parse_args()
 
 
-# ── 指令池（随机采样作为 Q） ──────────────────────────────────────────
-INSTRUCTION_POOL = [
-    "描述这张图片",
-    # "请描述一下这张图片的内容",
-    # "这张图片里有什么？",
-]
-
-
 def build_collate_fn(tokenizer, max_text_len: int):
-    """构建 DataLoader 的 collate 函数（QA 对话格式）。
+    """构建 DataLoader 的 collate 函数（多轮对话格式）。
 
-    每条样本随机采样一条指令作为 Q，caption 作为 A，
-    使用 Qwen3 chat template 格式化为对话，
-    仅在 A（assistant 回复）部分计算 loss。
+    直接使用数据集中的 conversations 构建 token 序列，
+    仅在 assistant 回复部分计算 loss。
 
-    训练时 LLM 实际看到的序列：
-        [visual_tokens] [Q_tokens(chat格式)] [A_tokens]
-        |--- -100 ----|  |---- -100 ----|    |-- loss --|
+    训练时 LLM 实际看到的序列（以 2 轮对话为例）：
+        [visual_tokens] [user_1(chat格式)] [asst_1] [user_2(chat格式)] [asst_2]
+        |--- -100 ----|  |---- -100 ----|  |- loss-|  |---- -100 ----|  |- loss-|
 
     Args:
         tokenizer: Qwen3 分词器。
-        max_text_len: 对话文本（Q+A）的最大 token 长度。
+        max_text_len: 对话文本的最大 token 长度。
 
     Returns:
         collate_fn 函数。
@@ -103,7 +99,7 @@ def build_collate_fn(tokenizer, max_text_len: int):
         """将一个 batch 的样本整理为模型可接受的张量字典。
 
         Args:
-            batch: DataLoader 采样的样本列表，每个元素含 'image' 和 'global_caption'。
+            batch: DataLoader 采样的样本列表，每个元素含 'image' 和 'conversations'。
 
         Returns:
             dict: 包含 'pixel_values' [B,3,224,224]、'input_ids' [B,T]、'labels' [B,T]。
@@ -111,15 +107,13 @@ def build_collate_fn(tokenizer, max_text_len: int):
         # ---- 图像：堆叠为一个 batch 张量 ----
         pixel_values = torch.stack([sample['image'] for sample in batch])
 
-        # ---- 构造 QA 对话：每条样本随机选一条指令作为 Q ----
+        # ---- 构造多轮对话 token 序列 ----
         all_input_ids = []
         all_labels = []
 
         for sample in batch:
-            instruction = random.choice(INSTRUCTION_POOL)
-            input_ids, labels = build_qa_ids(
-                instruction=instruction,
-                answer=sample['global_caption'],
+            input_ids, labels = build_conversation_ids(
+                conversations=sample['conversations'],
                 tokenizer=tokenizer,
                 max_len=max_text_len,
             )
@@ -131,7 +125,7 @@ def build_collate_fn(tokenizer, max_text_len: int):
         return {
             "pixel_values": pixel_values,
             "input_ids": pad_sequences(all_input_ids, pad_value=pad_id),
-            "labels": pad_sequences(all_labels, pad_value=-100),  # -100 表示 padding 位置不计算 loss
+            "labels": pad_sequences(all_labels, pad_value=-100),
         }
 
     return collate_fn
@@ -168,30 +162,28 @@ def evaluate(model, eval_dataloader, device, max_batches: int = 0):
         total_loss += loss.item()
         num_batches += 1
 
-    # 恢复训练模式（仅 projection 实际处于训练状态）
+    # 恢复训练模式（CLIP 冻结保持 eval）
     model.train()
     model.vision_tower.eval()
-    model.llm.eval()
 
     avg_loss = total_loss / max(num_batches, 1)
     ppl = math.exp(avg_loss)
     return avg_loss, ppl
 
 
-# important
 def main():
     """训练主函数。
 
     完整流程：
-    1. 加载模型（CLIP + Qwen3），冻结 CLIP 和 LLM，仅投影层可训练
-    2. 加载训练集和评估集（SA1B-Dense-Caption）
+    1. 加载模型（CLIP + Qwen3 + Stage 1 Projection 权重），全部参数可训练
+    2. 加载训练集（CogVLM-SFT-311K 单轮 + 多轮对话）
     3. 设置 AdamW 优化器 + Cosine 学习率调度（含 warmup）
     4. 训练循环：前向 → 反向 → 更新，定期日志/评估/保存
-    5. 训练结束后做全量评估并保存最终权重
+    5. 训练结束后保存完整模型权重
     """
     args = parse_args()
 
-    cli.print_header("LLaVA Stage 1 训练")
+    cli.print_header("LLaVA Stage 2 训练")
     cli.print_divider()
 
     # ── 设备 ──────────────────────────────────────────────────────────
@@ -201,17 +193,23 @@ def main():
     # ── 模型 ──────────────────────────────────────────────────────────
     cli.print_loading("CLIP + Qwen3 模型")
     model = LlavaForCausalLM(
-        vision_tower_path=CLIP_PATH,
-        llm_path=LLM_PATH,
+        vision_tower_path=args.clip_path,
+        llm_path=args.llm_path,
     )
+
+    # 加载 Stage 1 训练好的 projection 权重
+    assert args.projection_path, '必须指定 projection_path！'
+    cli.print_loading(f"Stage 1 Projection 权重: {args.projection_path}")
+    proj_state = torch.load(args.projection_path, map_location="cpu", weights_only=True)
+    model.projection.load_state_dict(proj_state)
+    cli.print_success("Projection 权重加载完成")
+
     print(model)
 
-    # Stage 1 策略：冻结 vision_tower + LLM，只训练 projection
+    # Stage 2 策略：冻结 CLIP，训练 Projection + LLM
     for param in model.vision_tower.parameters():
         param.requires_grad = False
-    for param in model.llm.parameters():
-        param.requires_grad = False
-    
+
     # 梯度检查点：前向传播时不保存中间激活值，反向时重新计算
     # 以额外的计算量换取大幅显存节省（LLM 参数量大，中间激活值占显存很多）
     model.llm.gradient_checkpointing_enable()
@@ -228,11 +226,17 @@ def main():
     cli.print_divider()
 
     # ── 训练数据集 ────────────────────────────────────────────────────
-    full_dataset = SA1BDataset(data_root=args.data_root, transform=IMAGE_TRANSFORM)
+    train_dataset = CogVLMSFTDataset(
+        data_root=args.data_root, transform=IMAGE_TRANSFORM,
+        split="train", eval_ratio=args.eval_ratio,
+    )
 
-    # 取前 MAX_SAMPLES 条（若数据集不足则用全部）
-    num_samples = min(MAX_SAMPLES, len(full_dataset))
-    train_dataset = Subset(full_dataset, range(num_samples))
+    # 取前 MAX_SAMPLES 条（-1 表示用全部；若数据集不足则用全部）
+    if MAX_SAMPLES > 0:
+        num_samples = min(MAX_SAMPLES, len(train_dataset))
+        train_dataset = Subset(train_dataset, range(num_samples))
+    else:
+        num_samples = len(train_dataset)
 
     collate_fn = build_collate_fn(model.tokenizer, MAX_TEXT_LEN)
     loader_kwargs = dict(
@@ -248,8 +252,11 @@ def main():
     cli.print_kv("训练样本数", f"{num_samples:,}")
     cli.print_kv("Batch size", args.batch_size)
 
-    # ── 评估数据集 ────────────────────────────────────────────────────
-    eval_dataset = SA1BDataset(data_root=args.eval_data_root, transform=IMAGE_TRANSFORM)
+    # ── 评估数据集（同目录划分） ──────────────────────────────────────
+    eval_dataset = CogVLMSFTDataset(
+        data_root=args.data_root, transform=IMAGE_TRANSFORM,
+        split="eval", eval_ratio=args.eval_ratio,
+    )
     eval_loader_kwargs = dict(
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -267,18 +274,14 @@ def main():
     total_steps = num_samples // args.batch_size
     warmup_steps = int(total_steps * args.warmup_ratio)
 
-    # AdamW 优化器：Adam + 权重衰减（Weight Decay）解耦版本
-    #   model.projection.parameters(): 只传入投影层参数（CLIP 和 LLM 已冻结）
-    #   lr: 初始学习率（会被 scheduler 动态调整）
-    #   weight_decay=0.0: 不使用权重衰减（投影层参数较少，无需额外正则化）
+    # AdamW 优化器：仅 Projection + LLM 参数参与优化（CLIP 已冻结）
+    trainable_param_list = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        model.projection.parameters(),
+        trainable_param_list,
         lr=args.lr,
         weight_decay=0.0,
     )
     # 余弦退火学习率调度器（含线性预热）
-    #   前 warmup_steps 步: lr 从 0 线性升至 args.lr
-    #   之后: lr 按余弦函数从 args.lr 平滑衰减至 ~0
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=warmup_steps,
@@ -305,9 +308,8 @@ def main():
 
     # ── 训练循环 ──────────────────────────────────────────────────────
     cli.print_info("开始训练...")
-    model.train()   # 实际只有 projection 是训练模式
-    model.vision_tower.eval()
-    model.llm.eval()
+    model.train()
+    model.vision_tower.eval()  # CLIP 冻结，保持 eval 模式
 
     global_step = 0
     log_loss = 0.0
@@ -340,7 +342,7 @@ def main():
             decoded_input = tokenizer.decode(sample_ids, skip_special_tokens=False)
             cli.print_kv("输入文本", decoded_input)
 
-            # 仅监督部分（A 部分）
+            # 仅监督部分（assistant 回复部分）
             label_ids = [t for t in sample_labels if t != -100]
             decoded_labels = tokenizer.decode(label_ids, skip_special_tokens=False)
             cli.print_kv("监督标签", decoded_labels)
@@ -348,16 +350,15 @@ def main():
             cli.print_divider()
 
         # 前向 + 反向（使用 bf16 混合精度以节省显存和加速计算）
-        # torch.amp.autocast: 自动混合精度上下文管理器
-        #   在此范围内，PyTorch 会自动将适合的运算（如矩阵乘法）转为 BF16 执行，
-        #   而对精度敏感的运算（如 loss 计算）保持 FP32，兼顾速度和精度
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             loss = model(pixel_values, input_ids, labels)
 
-        loss.backward()        # 反向传播，梯度仅流向 projection 层（其余已冻结）
-        optimizer.step()       # 更新 projection 层参数
-        scheduler.step()       # 更新学习率（cosine schedule）
-        optimizer.zero_grad()  # 清空梯度
+        loss.backward()
+        # 梯度裁剪：防止梯度爆炸，将梯度范数限制在 1.0 以内
+        torch.nn.utils.clip_grad_norm_(trainable_param_list, max_norm=1.0)
+        optimizer.step()
+        scheduler.step()
+        optimizer.zero_grad()
 
         # 统计
         loss_val = loss.item()
@@ -402,11 +403,11 @@ def main():
             writer.add_scalar("eval/ppl", eval_ppl, global_step)
             tqdm.write(f"  ✓ Eval Loss: {eval_loss:.4f} | Eval PPL: {eval_ppl:.2f}")
 
-        # 定期保存
+        # 定期保存（保存完整模型）
         if global_step % args.save_interval == 0:
             os.makedirs(save_dir, exist_ok=True)
-            ckpt_path = os.path.join(save_dir, f"stage1_projection_step{global_step}.pt")
-            torch.save(model.projection.state_dict(), ckpt_path)
+            ckpt_path = os.path.join(save_dir, f"stage2_llava_step{global_step}.pt")
+            torch.save(model.state_dict(), ckpt_path)
             tqdm.write(f"  ✓ Checkpoint 已保存: {ckpt_path}")
 
     pbar.close()
@@ -429,10 +430,10 @@ def main():
     cli.print_kv("最终 Eval PPL", f"{eval_ppl:.2f}")
     cli.print_kv("总耗时", f"{total_time:.1f}s ({total_time / 60:.1f}min)")
 
-    # 保存最终权重
+    # 保存最终完整模型权重
     os.makedirs(save_dir, exist_ok=True)
-    final_path = os.path.join(save_dir, "stage1_projection.pt")
-    torch.save(model.projection.state_dict(), final_path)
+    final_path = os.path.join(save_dir, "stage2_llava.pt")
+    torch.save(model.state_dict(), final_path)
     cli.print_success(f"最终权重已保存: {final_path}")
 
     writer.close()
