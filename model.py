@@ -143,7 +143,12 @@ class LlavaForCausalLM(nn.Module):
         self.vision_tower = CLIPVisionTower(vision_tower_path)
 
         # 2. 语言模型
+        # AutoTokenizer.from_pretrained: 自动加载模型目录下的分词器配置和词表
         self.tokenizer = AutoTokenizer.from_pretrained(llm_path)
+        # AutoModelForCausalLM.from_pretrained: 自动加载因果语言模型
+        #   torch_dtype=bfloat16: 使用 BF16 半精度加载权重，显存减半且数值稳定
+        #   attn_implementation="flash_attention_2": 启用 FlashAttention-2 加速注意力计算
+        #     FlashAttention 通过 IO 感知的分块算法将注意力计算从 O(N²) 显存降至 O(N)
         self.llm = AutoModelForCausalLM.from_pretrained(
             llm_path,
             torch_dtype=torch.bfloat16,
@@ -192,7 +197,7 @@ class LlavaForCausalLM(nn.Module):
             [visual_embeds.to(text_embeds.dtype), text_embeds], dim=1
         )
 
-        # ---- 构造 labels ----
+        # ---- 构造 labels，在原本的文字标签前，填充空token（视觉token对应的输出），使得标签个数与模型输出一致 ----
         # 视觉 token 位置不计算 loss，用 -100 填充
         batch_size = pixel_values.shape[0]
         num_visual_tokens = visual_features.shape[1]             # 197
@@ -248,6 +253,10 @@ class LlavaForCausalLM(nn.Module):
         )
 
         # ---- 生成 ----
+        # model.generate(): HuggingFace 的自回归文本生成方法
+        #   inputs_embeds: 直接传入嵌入向量（而非 input_ids），支持多模态输入
+        #   max_new_tokens: 最多生成的新 token 数量
+        #   do_sample=False: 使用贪心解码（每步选概率最高的 token），结果确定性
         outputs = self.llm.generate(
             inputs_embeds=combined_embeds,
             max_new_tokens=max_new_tokens,

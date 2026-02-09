@@ -8,7 +8,8 @@
 
 import sys
 import os
-# 将项目根目录加入模块搜索路径
+# sys.path.insert(0, path): 将指定路径插入到模块搜索路径列表的最前面
+# 这样 Python 就能在 scripts/ 子目录下导入项目根目录的 dataset、utils 等本地模块
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from torch.utils.data import DataLoader

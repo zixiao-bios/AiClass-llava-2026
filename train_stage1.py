@@ -43,14 +43,19 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 SAVE_DIR = os.path.join(PROJECT_ROOT, "checkpoints")
 LOG_DIR = os.path.join(PROJECT_ROOT, "runs")
 
-# CLIP 标准图像预处理
+# CLIP 标准图像预处理流水线（必须与 CLIP 训练时的预处理一致）
 IMAGE_TRANSFORM = transforms.Compose([
+    # 1. 将短边缩放到 224px，使用 BICUBIC 双三次插值（比 BILINEAR 更平滑）
     transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
+    # 2. 从中心裁剪 224×224 区域（配合 Resize 保证输出尺寸固定）
     transforms.CenterCrop(224),
+    # 3. PIL Image → Tensor，像素值从 [0,255] 归一化到 [0.0,1.0]
     transforms.ToTensor(),
+    # 4. ImageNet 标准化：(pixel - mean) / std，3 个通道分别处理
+    #    均值和标准差来自 OpenAI CLIP 论文的训练配置
     transforms.Normalize(
-        (0.48145466, 0.4578275, 0.40821073),
-        (0.26862954, 0.26130258, 0.27577711),
+        (0.48145466, 0.4578275, 0.40821073),    # RGB 三通道均值
+        (0.26862954, 0.26130258, 0.27577711),    # RGB 三通道标准差
     ),
 ])
 
@@ -276,11 +281,18 @@ def main():
     total_steps = num_samples // args.batch_size
     warmup_steps = int(total_steps * args.warmup_ratio)
 
+    # AdamW 优化器：Adam + 权重衰减（Weight Decay）解耦版本
+    #   model.projection.parameters(): 只传入投影层参数（CLIP 和 LLM 已冻结）
+    #   lr: 初始学习率（会被 scheduler 动态调整）
+    #   weight_decay=0.0: 不使用权重衰减（投影层参数较少，无需额外正则化）
     optimizer = torch.optim.AdamW(
         model.projection.parameters(),
         lr=args.lr,
         weight_decay=0.0,
     )
+    # 余弦退火学习率调度器（含线性预热）
+    #   前 warmup_steps 步: lr 从 0 线性升至 args.lr
+    #   之后: lr 按余弦函数从 args.lr 平滑衰减至 ~0
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=warmup_steps,
@@ -350,6 +362,9 @@ def main():
             cli.print_divider()
 
         # 前向 + 反向（使用 bf16 混合精度以节省显存和加速计算）
+        # torch.amp.autocast: 自动混合精度上下文管理器
+        #   在此范围内，PyTorch 会自动将适合的运算（如矩阵乘法）转为 BF16 执行，
+        #   而对精度敏感的运算（如 loss 计算）保持 FP32，兼顾速度和精度
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             loss = model(pixel_values, input_ids, labels)
 

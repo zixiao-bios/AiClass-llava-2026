@@ -83,10 +83,18 @@ def build_prompt_ids(messages: list[dict], tokenizer) -> torch.Tensor:
     Returns:
         shape [1, T] 的 token ID 张量。
     """
+    # apply_chat_template: 将消息列表格式化为模型期望的对话格式字符串
+    #   tokenize=False: 只返回格式化后的文本字符串，不直接转为 token ID
+    #   add_generation_prompt=True: 在末尾追加 assistant 角色前缀，引导模型开始生成
+    #   enable_thinking=False: 关闭 Qwen3 思维链，避免模型生成 <think> 内容
+    #   输入: [{"role":"user","content":"..."}, ...]
+    #   输出: "<|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n"
     prompt_text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True,
-        enable_thinking=False,   # 关闭 Qwen3 思维链，避免模型生成 <think> 内容
+        enable_thinking=False,
     )
+    # tokenizer.encode: 将文本字符串转为 token ID 列表
+    #   add_special_tokens=False: 不自动添加 BOS/EOS（chat template 已包含特殊 token）
     input_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
     return torch.tensor([input_ids], dtype=torch.long)
 
@@ -130,7 +138,11 @@ def main():
 
     # 加载训练好的投影层权重
     cli.print_loading(args.checkpoint, label="加载权重")
+    # torch.load: 反序列化 PyTorch 保存的权重文件
+    #   map_location="cpu": 先加载到 CPU（避免 GPU 显存不足），后续统一 .to(device)
+    #   weights_only=True: 仅加载张量数据，不执行 pickle 中的任意代码（安全性考虑）
     state_dict = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+    # load_state_dict: 将权重字典加载到模块中，键名需与模块参数名完全匹配
     model.projection.load_state_dict(state_dict)
     cli.print_success("投影层权重加载完成！")
 

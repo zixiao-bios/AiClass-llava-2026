@@ -36,14 +36,22 @@ def build_qa_ids(
     """
     # Q 部分：用 chat template 格式化，包含特殊 token 和生成提示
     q_messages = [{"role": "user", "content": instruction}]
+    # apply_chat_template: 将消息列表格式化为模型期望的对话格式
+    #   tokenize=False: 返回格式化后的字符串（而非直接 tokenize 为 ID）
+    #   add_generation_prompt=True: 追加 assistant 角色前缀，标记回复起始位置
+    #   enable_thinking=False: 关闭 Qwen3 的思维链（CoT）模式
+    #   输出示例: "<|im_start|>user\n描述这张图片<|im_end|>\n<|im_start|>assistant\n"
     q_text = tokenizer.apply_chat_template(
         q_messages, tokenize=False, add_generation_prompt=True,
         enable_thinking=False,   # 关闭 Qwen3 思维链
     )
+    # tokenizer.encode: 将文本字符串转为 token ID 列表
+    #   add_special_tokens=False: 不自动添加 BOS/EOS（template 中已包含需要的特殊 token）
     q_ids = tokenizer.encode(q_text, add_special_tokens=False)
 
-    # A 部分：回复文本 + EOS
+    # A 部分：回复文本 + EOS（End-of-Sequence 标记，告知模型回复结束）
     a_ids = tokenizer.encode(answer, add_special_tokens=False)
+    # tokenizer.eos_token_id: 句末标记的 token ID，模型在生成时遇到此 ID 会停止
     a_ids = a_ids + [tokenizer.eos_token_id]
 
     # 拼接 Q + A 并截断到 max_len（超长时只截断 A 的尾部）

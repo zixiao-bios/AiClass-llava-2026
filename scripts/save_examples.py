@@ -35,6 +35,8 @@ def main():
         print("SAVE_EXAMPLES <= 0，跳过保存")
         return
 
+    # os.makedirs: 递归创建多级目录（类似 mkdir -p）
+    #   exist_ok=True: 目录已存在时不报错
     os.makedirs(save_path, exist_ok=True)
     print("=" * 60)
     print(f"保存示例数据（前 {SAVE_EXAMPLES} 张）到 {SAVE_DIR}/")

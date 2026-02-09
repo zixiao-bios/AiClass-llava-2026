@@ -77,6 +77,7 @@ def load_images():
     return images, filenames
 
 
+# IMPORTANT
 @torch.no_grad()
 def compute_scores(text, images, clip, tokenizer, device):
     """计算一段文本与所有图片的余弦相似度。
@@ -92,21 +93,33 @@ def compute_scores(text, images, clip, tokenizer, device):
         list[float]: 每张图片与文本的余弦相似度分数。
     """
     # 编码文本（只需一次），L2 归一化
+    # tokenizer.encode: 将文本转为 token ID 张量
+    #   return_tensors="pt": 直接返回 PyTorch 张量（而非 Python 列表）
     text_ids = tokenizer.encode(text, return_tensors="pt").to(device)
+    # clip.encode_text: CLIP 文本编码器，将 token ID → 文本特征向量
+    #   输入: [1, T] token ID 张量  输出: [1, D] 文本特征（D=512 for ViT-B/16）
     text_feat = clip.encode_text(text_ids)
+    # L2 归一化：将向量缩放为单位长度，使余弦相似度 = 向量点积
     text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
 
-    # 分批编码图片，避免显存溢出
+    # 分批编码图片，避免一次性加载全部图片导致显存溢出
     all_img_feats = []
     for i in range(0, len(images), BATCH_SIZE):
+        # torch.stack: 将多个同形状张量沿新维度堆叠为一个 batch
+        #   输入: 张量列表 [T1, T2, ...]  输出: [B, C, H, W]
         batch = torch.stack(
             [PREPROCESS(im) for im in images[i:i+BATCH_SIZE]]
         ).to(device)
+        # clip.encode_image: CLIP 视觉编码器，将图像 → 视觉特征向量
+        #   输入: [B, 3, 224, 224]  输出: [B, D] 图片特征
         feat = clip.encode_image(batch)
         all_img_feats.append(feat / feat.norm(dim=-1, keepdim=True))
 
-    # 拼接所有图片特征，计算余弦相似度（矩阵乘法）
-    img_feats = torch.cat(all_img_feats, dim=0)
+    # torch.cat: 沿已有维度拼接张量（dim=0 即按 batch 维拼接）
+    img_feats = torch.cat(all_img_feats, dim=0)              # [N, D]
+    # 矩阵乘法计算余弦相似度：text_feat [1,D] @ img_feats.T [D,N] → [1,N]
+    # .squeeze(0): 去掉 batch 维度 [1,N] → [N]
+    # .cpu().tolist(): 将 GPU 张量转为 Python 列表
     return (text_feat @ img_feats.T).squeeze(0).cpu().tolist()
 
 
@@ -129,18 +142,24 @@ def draw_chart(scores, filenames, text):
     min_s, max_s = min(vals), max(vals)
     rng = max_s - min_s or 1.0  # 避免分母为 0
 
+    # plt.subplots: 创建图表和坐标轴
+    #   figsize=(w, h): 图表尺寸（英寸），高度随图片数量自适应
+    #   返回: (Figure 对象, Axes 坐标轴对象)
     fig, ax = plt.subplots(figsize=(10, max(8, len(names) * 0.25)))
+    # ax.barh: 绘制水平柱状图
+    #   输入: y 坐标列表, 柱子宽度列表, height=柱子高度
     bars = ax.barh(range(len(names)), vals, height=0.7)
 
     # 根据归一化分数映射 RdYlGn 色阶（低分红色→中间黄色→高分绿色）
+    # plt.cm.RdYlGn: matplotlib 内置的红-黄-绿色彩映射，输入 [0,1] 返回 RGBA 颜色
     for bar, v in zip(bars, vals):
         bar.set_color(plt.cm.RdYlGn((v - min_s) / rng))
 
-    ax.set_yticks(range(len(names)))
-    ax.set_yticklabels(names, fontsize=6)
-    ax.invert_yaxis()  # 最高分在最上方
-    ax.set_xlabel("Cosine Similarity")
-    ax.set_title(f"CLIP Match: {text}", fontsize=10, pad=12)
+    ax.set_yticks(range(len(names)))       # 设置 Y 轴刻度位置
+    ax.set_yticklabels(names, fontsize=6)  # 设置 Y 轴刻度标签（文件名）
+    ax.invert_yaxis()                      # 反转 Y 轴，使最高分在最上方
+    ax.set_xlabel("Cosine Similarity")     # X 轴标签
+    ax.set_title(f"CLIP Match: {text}", fontsize=10, pad=12)  # 图表标题
 
     # 在柱子右侧标注具体数值
     for i, v in enumerate(vals):
@@ -166,6 +185,7 @@ def main():
     print("CLIP 中文图文匹配评估工具")
     print("=" * 60)
     clip, tokenizer, device = load_model()
+    print(clip)
     images, filenames = load_images()
     print("=" * 60)
     print("输入描述文本，回车开始匹配（输入 q 退出）")
