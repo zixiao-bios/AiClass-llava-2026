@@ -45,6 +45,109 @@ AiClass-llava-2026/
     └── 0000.txt ~ 0099.txt    # 对应的文字描述
 ```
 
+## 环境配置
+
+### 1. 安装依赖
+
+```bash
+# 激活 conda 环境
+conda activate base
+
+# 更新 pip
+pip install --upgrade pip
+
+# 安装依赖
+pip install \
+    transformers==4.53.0 \
+    accelerate==1.1.0 \
+    peft==0.18.0 \
+    bitsandbytes==0.45.0 \
+    sentencepiece \
+    protobuf \
+    einops \
+    pillow \
+    diffusers \
+    pyyaml \
+    tensorboardX
+pip install modelscope[framework] oss2
+
+# 进入数据盘
+cd /root/autodl-tmp/
+
+# 克隆仓库
+git clone https://github.com/zixiao-bios/AiClass-llava-2026.git
+
+# 查看适配的 flash-atten 版本
+cd AiClass-llava-2026
+python scripts/check_flash_attn.py
+# 该脚本会输出一个链接，如：https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
+# 该链接就是适配当前系统的 flash-atten 的版本
+
+# 安装该版本的 flash-atten
+pip install https://xxxxxx # 替换成脚本输出的链接
+```
+
+### 2. 下载模型权重
+
+```bash
+# 安装 git-lfs 用于下载大文件
+apt update
+apt install git-lfs
+git lfs install
+
+# 进入数据盘
+cd /root/autodl-tmp/
+
+# 模型权重大概 7GB，网络情况不同，下载等待 3-10 分钟都是正常的
+# 下载 Qwen3 0.6B
+git clone https://www.modelscope.cn/Qwen/Qwen3-0.6B.git
+
+# 下载 CLIP
+git clone https://www.modelscope.cn/iic/multi-modal_clip-vit-base-patch16_zh.git
+```
+
+### 3. 下载数据集
+
+- 所有数据都来源于：https://modelscope.cn/datasets/Tongyi-DataEngine/SA1B-Dense-Caption/summary
+- 下载前 10 个分片，作为 stage1 的训练集
+
+```bash
+modelscope download --dataset 'Tongyi-DataEngine/SA1B-Dense-Caption' --include 'data/train-000*' --local_dir '/root/autodl-tmp/data_stage1_train'
+```
+
+- 第 11 个分片，作为 stage1 的验证集
+
+```bash
+modelscope download --dataset 'Tongyi-DataEngine/SA1B-Dense-Caption' --include 'data/train-0010*' --local_dir '/root/autodl-tmp/data_stage1_eval'
+```
+
+### 4. 进入项目目录，验证环境
+
+1. 测试 qwen 推理
+
+```bash
+python scripts/chat_qwen3.py
+```
+
+2. 测试 CLIP
+
+```bash
+# 生成测试数据集
+python scripts/save_examples.py
+
+# 测试 CLIP
+python scripts/clip_eval.py
+```
+
+### 5. 训练
+
+1. stage1
+
+```bash
+python train_stage1.py
+```
+
+
 ## 核心模块
 
 ### `model.py` — LLaVA Stage 1 模型
