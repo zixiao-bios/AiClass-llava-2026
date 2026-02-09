@@ -43,6 +43,7 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 SAVE_DIR = os.path.join(PROJECT_ROOT, "checkpoints")
 LOG_DIR = os.path.join(PROJECT_ROOT, "runs")
 
+# important
 # CLIP 标准图像预处理流水线（必须与 CLIP 训练时的预处理一致）
 IMAGE_TRANSFORM = transforms.Compose([
     # 1. 将短边缩放到 224px，使用 BICUBIC 双三次插值（比 BILINEAR 更平滑）
@@ -144,6 +145,7 @@ def build_collate_fn(tokenizer, max_text_len: int):
             all_labels.append(labels)
 
         # ---- Padding：将不等长序列填充到相同长度 ----
+        # important
         return {
             "pixel_values": pixel_values,
             "input_ids": pad_sequences(all_input_ids, pad_value=pad_id),
@@ -194,6 +196,7 @@ def evaluate(model, eval_dataloader, device, max_batches: int = 0):
     return avg_loss, ppl
 
 
+# important
 def main():
     """训练主函数。
 
@@ -219,6 +222,7 @@ def main():
         vision_tower_path=CLIP_PATH,
         llm_path=LLM_PATH,
     )
+    print(model)
 
     # Stage 1 策略：冻结 vision_tower + LLM，只训练 projection
     for param in model.vision_tower.parameters():

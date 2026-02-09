@@ -16,6 +16,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from utils import cli
 
 
+# important
 def main():
     """Qwen3 对话主函数。
 

@@ -113,6 +113,7 @@ def decode_response(output_ids: torch.Tensor, tokenizer) -> str:
     return text.strip()
 
 
+# important
 def main():
     """交互式评估主函数。
 

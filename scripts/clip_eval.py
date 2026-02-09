@@ -77,7 +77,7 @@ def load_images():
     return images, filenames
 
 
-# IMPORTANT
+# important
 @torch.no_grad()
 def compute_scores(text, images, clip, tokenizer, device):
     """计算一段文本与所有图片的余弦相似度。

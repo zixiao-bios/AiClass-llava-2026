@@ -1,0 +1,316 @@
+# CLIP VisualTransformer: Original vs LLaVA Adapted
+# 左：原始 CLIP 结构  |  右：适配 LLaVA 的新结构
+
+direction: down
+
+title: {
+  label: "CLIP VisualTransformer: 原始 vs LLaVA 适配"
+  near: top-center
+  style: {
+    font-size: 28
+    bold: true
+    underline: true
+  }
+}
+
+# ============================================================
+# 对比容器：grid 强制左右两列
+# ============================================================
+comparison: {
+  grid-columns: 2
+  label: ""
+  style: {
+    fill: transparent
+    stroke: transparent
+  }
+
+  # ============================================================
+  # 左侧：原始 CLIP VisualTransformer
+  # ============================================================
+  original: {
+    direction: down
+    label: "原始 CLIP VisualTransformer\n(用于图文匹配)"
+    style: {
+      fill: "#E3F2FD"
+      stroke: "#1565C0"
+      border-radius: 10
+      font-size: 20
+      bold: true
+    }
+
+    input: {
+      label: "输入图像\n[B, 3, 224, 224]"
+      shape: parallelogram
+      style: {
+        fill: "#BBDEFB"
+        stroke: "#1565C0"
+      }
+    }
+
+    conv1: {
+      label: "Patch Embedding (conv1)\nConv2d(3, 768, kernel=16, stride=16)\n→ [B, 768, 14, 14]"
+      style: {
+        fill: "#C8E6C9"
+        stroke: "#2E7D32"
+      }
+    }
+
+    reshape: {
+      label: "Reshape + Permute\n→ [B, 196, 768]"
+      style: {
+        fill: "#E8F5E9"
+        stroke: "#2E7D32"
+      }
+    }
+
+    cls_concat: {
+      label: "拼接 CLS Token\nclass_embedding [1, 768]\n→ [B, 197, 768]"
+      style: {
+        fill: "#C8E6C9"
+        stroke: "#2E7D32"
+      }
+    }
+
+    pos_embed: {
+      label: "加位置编码\npositional_embedding [197, 768]"
+      style: {
+        fill: "#C8E6C9"
+        stroke: "#2E7D32"
+      }
+    }
+
+    ln_pre: {
+      label: "LayerNorm (ln_pre)"
+      style: {
+        fill: "#E8F5E9"
+        stroke: "#2E7D32"
+      }
+    }
+
+    transformer: {
+      label: "Transformer Encoder\n(12 layers ViT-B/16)\n[197, B, 768] (LND 格式)"
+      style: {
+        fill: "#A5D6A7"
+        stroke: "#1B5E20"
+        font-size: 14
+      }
+    }
+
+    cls_pool: {
+      label: "CLS Pooling ⚠️\n只取 x[:, 0, :]\n→ [B, 768]"
+      shape: diamond
+      style: {
+        fill: "#FFCDD2"
+        stroke: "#B71C1C"
+        font-size: 14
+        bold: true
+      }
+    }
+
+    ln_post_cls: {
+      label: "LayerNorm (ln_post)\n仅对 CLS token ⚠️\n→ [B, 768]"
+      style: {
+        fill: "#FFCDD2"
+        stroke: "#B71C1C"
+        bold: true
+      }
+    }
+
+    proj: {
+      label: "Projection (self.proj) ⚠️\n[768, proj_dim] 矩阵乘法\n投影到 CLIP 图文共享空间\n→ [B, proj_dim]"
+      style: {
+        fill: "#FFCDD2"
+        stroke: "#B71C1C"
+        bold: true
+      }
+    }
+
+    output: {
+      label: "输出: [B, proj_dim]\n单一向量 (丢失空间信息)\n用于图文相似度匹配"
+      shape: parallelogram
+      style: {
+        fill: "#EF9A9A"
+        stroke: "#B71C1C"
+        font-size: 14
+        bold: true
+      }
+    }
+
+    input -> conv1 -> reshape -> cls_concat -> pos_embed -> ln_pre -> transformer
+    transformer -> cls_pool -> ln_post_cls -> proj -> output
+  }
+
+  # ============================================================
+  # 右侧：LLaVA 适配的 CLIPVisionTower
+  # ============================================================
+  llava: {
+    direction: down
+    label: "LLaVA 适配的 CLIPVisionTower\n(用于多模态理解)"
+    style: {
+      fill: "#E8F5E9"
+      stroke: "#1B5E20"
+      border-radius: 10
+      font-size: 20
+      bold: true
+    }
+
+    input: {
+      label: "输入图像\n[B, 3, 224, 224]"
+      shape: parallelogram
+      style: {
+        fill: "#BBDEFB"
+        stroke: "#1565C0"
+      }
+    }
+
+    conv1: {
+      label: "Patch Embedding (conv1)\nConv2d(3, 768, kernel=16, stride=16)\n→ [B, 768, 14, 14]"
+      style: {
+        fill: "#C8E6C9"
+        stroke: "#2E7D32"
+      }
+    }
+
+    reshape: {
+      label: "Reshape + Permute\n→ [B, 196, 768]"
+      style: {
+        fill: "#E8F5E9"
+        stroke: "#2E7D32"
+      }
+    }
+
+    cls_concat: {
+      label: "拼接 CLS Token\nclass_embedding [1, 768]\n→ [B, 197, 768]"
+      style: {
+        fill: "#C8E6C9"
+        stroke: "#2E7D32"
+      }
+    }
+
+    pos_embed: {
+      label: "加位置编码\npositional_embedding [197, 768]"
+      style: {
+        fill: "#C8E6C9"
+        stroke: "#2E7D32"
+      }
+    }
+
+    ln_pre: {
+      label: "LayerNorm (ln_pre)"
+      style: {
+        fill: "#E8F5E9"
+        stroke: "#2E7D32"
+      }
+    }
+
+    transformer: {
+      label: "Transformer Encoder\n(12 layers ViT-B/16)\n[197, B, 768] (LND 格式)"
+      style: {
+        fill: "#A5D6A7"
+        stroke: "#1B5E20"
+        font-size: 14
+      }
+    }
+
+    ln_post_all: {
+      label: "LayerNorm (ln_post)\n对所有 197 个 token ✅\n→ [B, 197, 768]"
+      style: {
+        fill: "#C8E6C9"
+        stroke: "#2E7D32"
+        stroke-width: 3
+        bold: true
+      }
+    }
+
+    no_proj: {
+      label: "跳过 self.proj ✅\n不投影到图文共享空间\n保留原始 Transformer 特征"
+      shape: diamond
+      style: {
+        fill: "#C8E6C9"
+        stroke: "#2E7D32"
+        stroke-width: 3
+        bold: true
+      }
+    }
+
+    output: {
+      label: "输出: [B, 197, 768]\n保留所有 patch token 的特征\n(含空间信息，供 LLM 感知图像各区域)"
+      shape: parallelogram
+      style: {
+        fill: "#81C784"
+        stroke: "#1B5E20"
+        font-size: 14
+        bold: true
+      }
+    }
+
+    downstream: {
+      label: "→ MultimodalProjection (MLP)\n  Linear(768→1024) → GELU → Linear(1024→1024)\n→ 与 text_embeds 拼接后送入 Qwen3"
+      style: {
+        fill: "#FFF3E0"
+        stroke: "#E65100"
+        font-size: 13
+        border-radius: 8
+      }
+    }
+
+    input -> conv1 -> reshape -> cls_concat -> pos_embed -> ln_pre -> transformer
+    transformer -> ln_post_all -> no_proj -> output -> downstream
+  }
+}
+
+# ============================================================
+# 两侧对比连线（虚线标注关键差异）
+# ============================================================
+comparison.original.cls_pool -> comparison.llava.ln_post_all: "差异①: 不做 CLS 池化\n保留全部 197 个 token" {
+  style: {
+    stroke: "#D32F2F"
+    stroke-dash: 5
+    stroke-width: 2
+    font-size: 14
+    bold: true
+    font-color: "#D32F2F"
+  }
+}
+
+comparison.original.proj -> comparison.llava.no_proj: "差异②: 跳过 proj 投影\n由后续 MLP 完成映射" {
+  style: {
+    stroke: "#D32F2F"
+    stroke-dash: 5
+    stroke-width: 2
+    font-size: 14
+    bold: true
+    font-color: "#D32F2F"
+  }
+}
+
+comparison.original.ln_post_cls -> comparison.llava.ln_post_all: "差异③: ln_post 作用于\n所有 token (非仅 CLS)" {
+  style: {
+    stroke: "#D32F2F"
+    stroke-dash: 5
+    stroke-width: 2
+    font-size: 14
+    bold: true
+    font-color: "#D32F2F"
+  }
+}
+
+# ============================================================
+# 底部对比说明
+# ============================================================
+summary: {
+  label: "关键修改总结\n\n① 输出 token: CLS 单向量 [B, proj_dim] → 全部 197 token [B, 197, 768]\n② ln_post 范围: 仅 CLS token → 所有 197 个 token\n③ self.proj: 有 (图文共享空间) → 无 (由后续 MLP 映射到 LLM 空间)\n④ 空间信息: 丢失 (池化) → 保留 (LLM 感知图像各区域)\n⑤ 目标任务: 图文匹配/检索 → 多模态理解与生成"
+  style: {
+    fill: "#FFFDE7"
+    stroke: "#F57F17"
+    border-radius: 10
+    font-size: 14
+  }
+}
+
+comparison -> summary: "" {
+  style: {
+    stroke: "#9E9E9E"
+    stroke-dash: 3
+  }
+}

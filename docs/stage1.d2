@@ -1,0 +1,470 @@
+# Stage1: Visual-Language Alignment Training
+# 仅训练 MLP Projection，冻结 CLIP 和 Qwen3
+
+direction: down
+
+title: {
+  label: "Stage1: 视觉-语言对齐训练流程"
+  style: {
+    font-size: 28
+    bold: true
+    underline: true
+  }
+}
+
+# ============================================================
+# 数据加载
+# ============================================================
+data: {
+  label: "数据加载"
+  style: {
+    fill: "#E3F2FD"
+    stroke: "#1565C0"
+    border-radius: 8
+    font-size: 18
+    bold: true
+  }
+
+  parquet: {
+    label: "SA1B-Dense-Caption\nParquet 文件"
+    shape: cylinder
+    style.fill: "#BBDEFB"
+  }
+
+  parse: {
+    label: "解析 Parquet\nurl + cap_seg.global_caption"
+    shape: rectangle
+    style.fill: "#E3F2FD"
+  }
+
+  download: {
+    label: "按 URL 下载图片\n→ PIL Image"
+    shape: rectangle
+    style.fill: "#E3F2FD"
+  }
+
+  sample: {
+    label: "取前 100K 样本\n(Subset)"
+    shape: rectangle
+    style.fill: "#E3F2FD"
+  }
+
+  parquet -> parse -> download -> sample
+}
+
+# ============================================================
+# 图像预处理
+# ============================================================
+img_preprocess: {
+  label: "图像预处理"
+  style: {
+    fill: "#FFF3E0"
+    stroke: "#E65100"
+    border-radius: 8
+    font-size: 18
+    bold: true
+  }
+
+  resize: {
+    label: "Resize(224, BICUBIC)"
+    style.fill: "#FFE0B2"
+  }
+  crop: {
+    label: "CenterCrop(224)"
+    style.fill: "#FFE0B2"
+  }
+  tensor: {
+    label: "ToTensor()"
+    style.fill: "#FFE0B2"
+  }
+  norm: {
+    label: "Normalize\n(CLIP mean/std)"
+    style.fill: "#FFE0B2"
+  }
+  img_out: {
+    label: "pixel_values\n[B, 3, 224, 224]"
+    shape: parallelogram
+    style.fill: "#FFCC80"
+  }
+
+  resize -> crop -> tensor -> norm -> img_out
+}
+
+# ============================================================
+# 文本预处理
+# ============================================================
+txt_preprocess: {
+  label: "文本预处理 (build_qa_ids)"
+  style: {
+    fill: "#F3E5F5"
+    stroke: "#6A1B9A"
+    border-radius: 8
+    font-size: 18
+    bold: true
+  }
+
+  instruction: {
+    label: "随机选取指令\nINSTRUCTION_POOL\n(如 \"描述这张图片\")"
+    shape: hexagon
+    style.fill: "#E1BEE7"
+  }
+
+  qa_format: {
+    label: "构造 QA 对\nQ: Qwen3 Chat Template\nA: Caption + EOS"
+    style.fill: "#E1BEE7"
+  }
+
+  tokenize: {
+    label: "Tokenize\n(max_len=128)"
+    style.fill: "#E1BEE7"
+  }
+
+  labels_build: {
+    label: "构建 Labels\nQ 部分 → -100 (忽略)\nA 部分 → token IDs (监督)"
+    style.fill: "#E1BEE7"
+  }
+
+  ids_out: {
+    label: "input_ids [B, T]\nlabels [B, T]"
+    shape: parallelogram
+    style.fill: "#CE93D8"
+  }
+
+  instruction -> qa_format -> tokenize -> labels_build -> ids_out
+}
+
+# ============================================================
+# Collate & DataLoader
+# ============================================================
+collate: {
+  label: "Collate Function\n堆叠图像 + 填充序列到相同长度"
+  shape: rectangle
+  style: {
+    fill: "#F1F8E9"
+    stroke: "#33691E"
+    font-size: 16
+    border-radius: 8
+  }
+}
+
+# ============================================================
+# 模型前向传播
+# ============================================================
+forward: {
+  label: "模型前向传播"
+  style: {
+    fill: "#E8F5E9"
+    stroke: "#1B5E20"
+    border-radius: 8
+    font-size: 18
+    bold: true
+  }
+
+  clip: {
+    label: "CLIPVisionTower\n(冻结 ❄️)\nChinese-CLIP ViT-B/16"
+    shape: rectangle
+    style: {
+      fill: "#C8E6C9"
+      stroke: "#2E7D32"
+      stroke-dash: 5
+    }
+  }
+
+  clip_out: {
+    label: "视觉特征\n[B, 197, 768]"
+    shape: parallelogram
+    style.fill: "#A5D6A7"
+  }
+
+  projection: {
+    label: "MultimodalProjection\n(可训练 🔥)\nLinear(768→1024) → GELU → Linear(1024→1024)"
+    shape: rectangle
+    style: {
+      fill: "#FF8A65"
+      stroke: "#BF360C"
+      stroke-width: 3
+    }
+  }
+
+  proj_out: {
+    label: "visual_embeds\n[B, 197, 1024]"
+    shape: parallelogram
+    style.fill: "#A5D6A7"
+  }
+
+  embed_tokens: {
+    label: "llm.embed_tokens\n(Qwen3)"
+    shape: rectangle
+    style: {
+      fill: "#C8E6C9"
+      stroke: "#2E7D32"
+      stroke-dash: 5
+    }
+  }
+
+  text_embeds: {
+    label: "text_embeds\n[B, T, 1024]"
+    shape: parallelogram
+    style.fill: "#A5D6A7"
+  }
+
+  concat_embeds: {
+    label: "Concat Embeds\ntorch.cat([visual_embeds, text_embeds], dim=1)"
+    shape: diamond
+    style: {
+      fill: "#DCEDC8"
+      stroke: "#33691E"
+    }
+  }
+
+  combined_embeds: {
+    label: "combined_embeds\n[B, 197+T, 1024]"
+    shape: parallelogram
+    style.fill: "#A5D6A7"
+  }
+
+  # ---- 构造 combined_labels ----
+  ignore_labels: {
+    label: "构造 ignore_labels\ntorch.full((B, 197), -100)\n视觉 token 位置不计算 loss"
+    shape: rectangle
+    style: {
+      fill: "#FFECB3"
+      stroke: "#FF6F00"
+      stroke-width: 2
+    }
+  }
+
+  concat_labels: {
+    label: "Concat Labels\ntorch.cat([ignore_labels, labels], dim=1)"
+    shape: diamond
+    style: {
+      fill: "#DCEDC8"
+      stroke: "#33691E"
+    }
+  }
+
+  combined_labels: {
+    label: "combined_labels\n[B, 197+T]\n(前 197 位 = -100, 后 T 位 = 原 labels)"
+    shape: parallelogram
+    style.fill: "#A5D6A7"
+  }
+
+  llm: {
+    label: "Qwen3-0.6B\n(冻结 ❄️, gradient_checkpointing)\nFlash Attention 2, bf16"
+    shape: rectangle
+    style: {
+      fill: "#C8E6C9"
+      stroke: "#2E7D32"
+      stroke-dash: 5
+    }
+  }
+
+  loss: {
+    label: "CrossEntropy Loss\n(仅计算 Answer 部分)"
+    shape: parallelogram
+    style: {
+      fill: "#FFCDD2"
+      stroke: "#B71C1C"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  clip -> clip_out -> projection -> proj_out -> concat_embeds
+  embed_tokens -> text_embeds -> concat_embeds
+  concat_embeds -> combined_embeds
+
+  proj_out -> ignore_labels: "num_visual_tokens = 197" {
+    style: {
+      stroke: "#FF6F00"
+      stroke-dash: 3
+    }
+  }
+  ignore_labels -> concat_labels
+  concat_labels -> combined_labels
+
+  combined_embeds -> llm
+  combined_labels -> llm: "labels" {
+    style: {
+      stroke: "#FF6F00"
+      stroke-width: 2
+    }
+  }
+  llm -> loss
+}
+
+# ============================================================
+# 训练循环
+# ============================================================
+training: {
+  label: "训练循环"
+  style: {
+    fill: "#FFF9C4"
+    stroke: "#F57F17"
+    border-radius: 8
+    font-size: 18
+    bold: true
+  }
+
+  backward: {
+    label: "loss.backward()\n梯度仅流向 Projection"
+    style.fill: "#FFF59D"
+  }
+
+  optimizer: {
+    label: "AdamW.step()\n(lr=2e-3, 仅更新 Projection)"
+    style.fill: "#FFF59D"
+  }
+
+  scheduler: {
+    label: "CosineScheduler.step()\n(warmup 3%)"
+    style.fill: "#FFF59D"
+  }
+
+  zero_grad: {
+    label: "optimizer.zero_grad()"
+    style.fill: "#FFF59D"
+  }
+
+  backward -> optimizer -> scheduler -> zero_grad
+}
+
+# ============================================================
+# 日志与评估
+# ============================================================
+logging: {
+  label: "日志 & 评估 & 保存"
+  style: {
+    fill: "#FCE4EC"
+    stroke: "#880E4F"
+    border-radius: 8
+    font-size: 18
+    bold: true
+  }
+
+  log_step: {
+    label: "每 10 步\n打印 loss / perplexity / lr"
+    shape: rectangle
+    style.fill: "#F8BBD0"
+  }
+
+  eval_step: {
+    label: "每 200 步\n在 eval set 上评估\n(500 samples)"
+    shape: rectangle
+    style.fill: "#F8BBD0"
+  }
+
+  save_step: {
+    label: "每 1000 步\n保存 checkpoint\nstage1_projection_step{N}.pt"
+    shape: rectangle
+    style.fill: "#F8BBD0"
+  }
+
+  tensorboard: {
+    label: "TensorBoard\ntrain/eval loss\nperplexity, lr"
+    shape: cylinder
+    style.fill: "#F48FB1"
+  }
+
+  log_step -> tensorboard
+  eval_step -> tensorboard
+}
+
+# ============================================================
+# 最终输出
+# ============================================================
+final: {
+  label: "训练结束"
+  style: {
+    fill: "#E0F7FA"
+    stroke: "#006064"
+    border-radius: 8
+    font-size: 18
+    bold: true
+  }
+
+  final_eval: {
+    label: "完整 eval set 评估"
+    style.fill: "#B2EBF2"
+  }
+
+  save_final: {
+    label: "保存最终权重\nstage1_projection.pt"
+    shape: cylinder
+    style: {
+      fill: "#80DEEA"
+      stroke: "#006064"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  final_eval -> save_final
+}
+
+# ============================================================
+# 主流程连接
+# ============================================================
+data.sample -> img_preprocess.resize: "PIL Image" {
+  style.stroke: "#E65100"
+}
+data.sample -> txt_preprocess.instruction: "global_caption" {
+  style.stroke: "#6A1B9A"
+}
+
+img_preprocess.img_out -> collate: "pixel_values" {
+  style.stroke: "#E65100"
+}
+txt_preprocess.ids_out -> collate: "input_ids + labels" {
+  style.stroke: "#6A1B9A"
+}
+
+collate -> forward.clip: "pixel_values" {
+  style.stroke: "#E65100"
+}
+collate -> forward.embed_tokens: "input_ids" {
+  style.stroke: "#6A1B9A"
+}
+collate -> forward.concat_labels: "labels [B, T]" {
+  style.stroke: "#FF6F00"
+}
+
+forward.loss -> training.backward: "loss" {
+  style: {
+    stroke: "#B71C1C"
+    stroke-width: 2
+  }
+}
+
+training.zero_grad -> forward.clip: "下一个 batch" {
+  style: {
+    stroke: "#F57F17"
+    stroke-dash: 5
+  }
+}
+
+training.zero_grad -> logging.log_step: "定期" {
+  style: {
+    stroke: "#880E4F"
+    stroke-dash: 5
+  }
+}
+training.zero_grad -> logging.eval_step: "定期" {
+  style: {
+    stroke: "#880E4F"
+    stroke-dash: 5
+  }
+}
+training.zero_grad -> logging.save_step: "定期" {
+  style: {
+    stroke: "#880E4F"
+    stroke-dash: 5
+  }
+}
+
+logging.save_step -> final.final_eval: "训练完成后" {
+  style: {
+    stroke: "#006064"
+    stroke-width: 2
+  }
+}

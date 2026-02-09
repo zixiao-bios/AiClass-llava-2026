@@ -16,6 +16,7 @@ from modelscope.models import Model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
+# important
 class CLIPVisionTower(nn.Module):
     """CLIP ViT-B/16 视觉编码器包装器。
 
@@ -86,6 +87,7 @@ class CLIPVisionTower(nn.Module):
         return x
 
 
+# important
 class MultimodalProjection(nn.Module):
     """多模态投影层：2 层 MLP，将视觉特征映射到语言模型嵌入空间。
 
@@ -119,6 +121,7 @@ class MultimodalProjection(nn.Module):
         return self.linear_2(self.act(self.linear_1(x)))
 
 
+# important
 class LlavaForCausalLM(nn.Module):
     """LLaVA 多模态模型。
 
