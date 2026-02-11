@@ -10,6 +10,8 @@ import glob
 import ast
 import os
 import json
+import time
+import random
 
 import pandas as pd
 import requests
@@ -20,22 +22,44 @@ from torch.utils.data import Dataset
 from utils import cli
 
 
-def load_image_from_url(url: str, timeout: int = 10) -> Image.Image:
-    """从 URL 下载并加载图片，转为 RGB 格式。
+def load_image_from_url(
+    url: str, timeout: int = 10, max_retries: int = 3, backoff: float = 1.0
+) -> Image.Image:
+    """从 URL 下载并加载图片，转为 RGB 格式；失败时自动重试。
 
     Args:
         url: 图片的 HTTP/HTTPS 地址。
         timeout: 请求超时时间（秒），默认 10。
+        max_retries: 最大重试次数，默认 3。
+        backoff: 重试退避基准时间（秒），实际等待 = backoff * 2^attempt + 随机抖动。
 
     Returns:
         RGB 格式的 PIL Image 对象。
 
     Raises:
-        requests.HTTPError: HTTP 请求失败时抛出。
+        Exception: 所有重试均失败后，抛出最后一次异常。
     """
-    response = requests.get(url, timeout=timeout)
-    response.raise_for_status()  # 非 2xx 状态码会抛出异常
-    return Image.open(BytesIO(response.content)).convert('RGB')
+    last_exc: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.get(url, timeout=timeout)
+            response.raise_for_status()
+            return Image.open(BytesIO(response.content)).convert('RGB')
+        except Exception as e:
+            last_exc = e
+            if attempt < max_retries:
+                wait = backoff * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                cli.print_warning(
+                    f"[SA1B] 下载失败 (第 {attempt}/{max_retries} 次), "
+                    f"{wait:.1f}s 后重试 | url={url} | {type(e).__name__}: {e}"
+                )
+                time.sleep(wait)
+            else:
+                cli.print_error(
+                    f"[SA1B] 下载失败 (已达最大重试 {max_retries} 次), 放弃 | "
+                    f"url={url} | {type(e).__name__}: {e}"
+                )
+    raise last_exc  # type: ignore[misc]
 
 
 class SA1BDataset(Dataset):
@@ -63,6 +87,9 @@ class SA1BDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         """根据索引获取一条样本（图片 + 全局描述）。
 
+        下载失败时自动重试 3 次；若仍然失败，则随机跳转到另一个样本，
+        避免因单条数据的网络问题导致整个训练中断。
+
         Args:
             idx: 样本索引。
 
@@ -71,20 +98,31 @@ class SA1BDataset(Dataset):
                 - 'image': PIL Image 或经过 transform 后的 Tensor。
                 - 'global_caption': 图片的全局文字描述（str）。
         """
-        row = self.df.iloc[idx]
-        image = load_image_from_url(row['url'])
-        if self.transform:
-            image = self.transform(image)
+        for _ in range(len(self)):  # 最多尝试遍历整个数据集
+            row = self.df.iloc[idx]
+            try:
+                image = load_image_from_url(row['url'])
+            except Exception:
+                # load_image_from_url 内部已重试 3 次并输出日志，此处跳过该样本
+                cli.print_warning(f"[SA1B] 跳过样本 idx={idx}，随机选取替代样本")
+                idx = random.randint(0, len(self) - 1)
+                continue
 
-        # cap_seg 字段可能是字符串形式的字典，需用 ast.literal_eval 安全解析
-        cap_seg = row['cap_seg']
-        if isinstance(cap_seg, str):
-            cap_seg = ast.literal_eval(cap_seg)
+            if self.transform:
+                image = self.transform(image)
 
-        return {
-            'image': image,
-            'global_caption': cap_seg['global_caption'],
-        }
+            # cap_seg 字段可能是字符串形式的字典，需用 ast.literal_eval 安全解析
+            cap_seg = row['cap_seg']
+            if isinstance(cap_seg, str):
+                cap_seg = ast.literal_eval(cap_seg)
+
+            return {
+                'image': image,
+                'global_caption': cap_seg['global_caption'],
+            }
+
+        # 极端情况：所有样本均下载失败
+        raise RuntimeError("[SA1B] 所有样本均下载失败，请检查网络连接")
 
 
 # ── Stage 2 数据集 ─────────────────────────────────────────────────────
