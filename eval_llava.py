@@ -2,12 +2,14 @@
 """
 LLaVA 交互式评估脚本
 
-加载训练好的投影层权重，支持通过 URL 设置图片，
+加载训练好的权重，支持通过 URL 设置图片，
 进行多轮对话式的图文问答推理。
 
 用法:
+    # Stage1: 仅加载投影层权重
     python eval_llava.py --checkpoint checkpoints/stage1_projection.pt
-    python eval_llava.py --checkpoint checkpoints/stage1_projection_step1000.pt --max_new_tokens 512
+    # Stage2: 加载完整模型权重
+    python eval_llava.py --llava_path checkpoints/<run_tag>/stage2_llava.pt
 
 交互命令:
     - 输入图片 URL（以 http 开头） → 加载图片并重置对话
@@ -49,11 +51,21 @@ def parse_args():
                         help=f"CLIP 模型路径（默认 {CLIP_PATH}）")
     parser.add_argument("--llm_path", type=str, default=LLM_PATH,
                         help=f"Qwen3 模型路径（默认 {LLM_PATH}）")
-    parser.add_argument("--checkpoint", type=str, required=True,
-                        help="投影层权重路径（如 checkpoints/stage1_projection.pt）")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Stage1 投影层权重路径（如 checkpoints/stage1_projection.pt）")
+    parser.add_argument("--llava_path", type=str, default=None,
+                        help="Stage2 完整模型权重路径（如 checkpoints/<run_tag>/stage2_llava.pt）")
     parser.add_argument("--max_new_tokens", type=int, default=256,
                         help="最大生成 token 数（默认 256）")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # --checkpoint 和 --llava_path 必须指定且只能指定其中一个
+    if not args.checkpoint and not args.llava_path:
+        parser.error("必须指定 --checkpoint 或 --llava_path 之一")
+    if args.checkpoint and args.llava_path:
+        parser.error("--checkpoint 和 --llava_path 不能同时指定")
+
+    return args
 
 
 def load_and_preprocess_image(url: str) -> tuple[Image.Image, torch.Tensor]:
@@ -137,15 +149,26 @@ def main():
         llm_path=args.llm_path,
     )
 
-    # 加载训练好的投影层权重
-    cli.print_loading(args.checkpoint, label="加载权重")
-    # torch.load: 反序列化 PyTorch 保存的权重文件
-    #   map_location="cpu": 先加载到 CPU（避免 GPU 显存不足），后续统一 .to(device)
-    #   weights_only=True: 仅加载张量数据，不执行 pickle 中的任意代码（安全性考虑）
-    state_dict = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
-    # load_state_dict: 将权重字典加载到模块中，键名需与模块参数名完全匹配
-    model.projection.load_state_dict(state_dict)
-    cli.print_success("投影层权重加载完成！")
+    # 加载训练好的权重
+    if args.llava_path:
+        # Stage2: 加载完整模型权重（projection + llm）
+        cli.print_loading(args.llava_path, label="加载权重")
+        # torch.load: 反序列化 PyTorch 保存的权重文件
+        #   map_location="cpu": 先加载到 CPU（避免 GPU 显存不足），后续统一 .to(device)
+        #   weights_only=True: 仅加载张量数据，不执行 pickle 中的任意代码（安全性考虑）
+        state_dict = torch.load(args.llava_path, map_location="cpu", weights_only=True)
+        # load_state_dict: 将权重字典加载到整个模型
+        #   strict=False: 允许跳过 vision_tower 的 key（CLIP 已从预训练路径加载，
+        #   且 Stage2 训练时 CLIP 冻结不变，checkpoint 中可能不含 vision_tower 权重）
+        model.load_state_dict(state_dict, strict=False)
+        cli.print_success("完整模型权重加载完成（Stage2）！")
+    else:
+        # Stage1: 仅加载投影层权重
+        cli.print_loading(args.checkpoint, label="加载权重")
+        state_dict = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+        # load_state_dict: 将权重字典加载到投影层模块，键名需与模块参数名完全匹配
+        model.projection.load_state_dict(state_dict)
+        cli.print_success("投影层权重加载完成（Stage1）！")
 
     model.to(device)
     model.eval()
