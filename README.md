@@ -106,10 +106,10 @@ cd /root/autodl-tmp/
 
 # 模型权重大概 7GB，网络情况不同，下载等待 3-10 分钟都是正常的
 # 下载 Qwen3 0.6B
-git clone https://www.modelscope.cn/Qwen/Qwen3-0.6B.git
+modelscope download --model 'Qwen/Qwen3-0.6B' --local_dir '/root/autodl-tmp/Qwen3-0.6B'
 
 # 下载 CLIP
-git clone https://www.modelscope.cn/iic/multi-modal_clip-vit-base-patch16_zh.git
+modelscope download --model 'iic/multi-modal_clip-vit-base-patch16_zh' --local_dir '/root/autodl-tmp/clip-vit-base-patch16'
 ```
 
 ### 3. 下载数据集
