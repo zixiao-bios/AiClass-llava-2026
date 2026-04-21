@@ -1,6 +1,6 @@
 # AiClass-LLaVA-2026
 
-多模态大模型课程实践项目 —— 实现 LLaVA 两阶段训练，将 CLIP 视觉特征对齐到 Qwen3 语言模型的嵌入空间，并通过指令微调使模型具备多轮图文对话能力。
+多模态大模型课程实践项目 —— 实现 LLaVA 三阶段训练，将 CLIP 视觉特征对齐到 Qwen3 语言模型的嵌入空间，通过指令微调使模型具备多轮图文对话能力，并通过 LoRA 参数高效微调进一步适配特定风格 / 领域。
 
 ## 项目架构
 
@@ -10,10 +10,17 @@ Stage 1 — 模态对齐（仅训练 Projection）:
         → Linear Projection (trainable) → [B, 197, 1024]
         → concat with text embeds → Qwen3-0.6B (frozen) → caption loss
 
-Stage 2 — 指令微调（训练 Projection + LLM）:
+Stage 2 — 指令微调（训练 Projection + LLM 全参数）:
   Image → CLIP ViT-B/16 (frozen) → [B, 197, 768]
         → Linear Projection (trainable) → [B, 197, 1024]
         → concat with text embeds → Qwen3-0.6B (trainable) → conversation loss
+
+Stage 3 — LoRA 微调（训练 Projection + LLM LoRA 旁路）:
+  Image → CLIP ViT-B/16 (frozen) → [B, 197, 768]
+        → Linear Projection (可选 trainable) → [B, 197, 1024]
+        → concat with text embeds
+        → Qwen3-0.6B (原权重 frozen ❄️ + LoRA 低秩旁路 trainable 🔥)
+        → conversation loss on 风格化/领域化 数据集
 
 推理流程：
   Image + 对话历史 → 视觉特征 + 文本 token → Qwen3 自回归生成回复
@@ -29,8 +36,10 @@ AiClass-llava-2026/
 ├── model.py                   # LLaVA 模型定义（CLIP + Projection + Qwen3）
 ├── dataset.py                 # 数据集模块（SA1BDataset + CogVLMSFTDataset）
 ├── train_stage1.py            # Stage 1 训练脚本（模态对齐）
-├── train_stage2.py            # Stage 2 训练脚本（指令微调）
-├── eval_llava.py              # 交互式图文问答评估脚本
+├── train_stage2.py            # Stage 2 训练脚本（全参数指令微调）
+├── train_stage3_lora.py       # Stage 3 训练脚本（LoRA 参数高效微调）
+├── eval_llava.py              # Stage 1/2 交互式图文问答评估脚本
+├── eval_llava_lora.py         # Stage 3 (LoRA) 交互式图文问答评估脚本
 │
 ├── utils/                     # 工具包
 │   ├── __init__.py
@@ -170,6 +179,25 @@ python train_stage1.py
 python train_stage2.py --projection_path your/path/to/ckpt
 ```
 
+3. Stage 3 — LoRA 参数高效微调（需指定 Stage 2 训练好的完整模型权重）
+
+```bash
+# 默认配置：r=8, α=16, lr=2e-4, 目标模块={q,k,v,o}_proj, Projection 也训练
+python train_stage3_lora.py --stage2_path checkpoints/<run_tag>/stage2_llava.pt
+
+# 自定义 LoRA 超参
+python train_stage3_lora.py \
+    --stage2_path checkpoints/<run_tag>/stage2_llava.pt \
+    --lora_r 16 --lora_alpha 32 --lr 3e-4
+
+# 冻结 Projection、仅训练 LoRA（最纯粹的 PEFT）
+python train_stage3_lora.py \
+    --stage2_path checkpoints/<run_tag>/stage2_llava.pt \
+    --no_train_projection
+```
+
+训练结束后会在 `checkpoints/<run_tag>/` 下得到 `lora_final.pt` 和（可选）`projection_final.pt`，总大小仅几十 MB。
+
 ## 核心模块
 
 ### `model.py` — LLaVA 多模态模型
@@ -206,13 +234,78 @@ python train_stage2.py --projection_path your/path/to/ckpt
 - 梯度裁剪（max_norm=1.0）防止梯度爆炸
 - 保存完整模型 state_dict（含 CLIP + Projection + LLM）
 
-### `eval_llava.py` — 交互式评估
+### `train_stage3_lora.py` — Stage 3 LoRA 微调
 
-- 加载训练好的投影层权重，支持多轮图文对话
+- 加载 Stage 2 完整权重作为起点，使用 [PEFT](https://github.com/huggingface/peft) 的 `inject_adapter_in_model` **原地**将 Qwen3 指定的 Linear 层替换为 LoraLinear（并联低秩旁路 `B · A`），对 `model.py` 零侵入
+- 冻结策略：CLIP ❄️、LLM 原权重 ❄️、LoRA 🔥、Projection 默认 🔥（可通过 `--no_train_projection` 关闭）
+- 可训练参数量从 Stage 2 的 ~600 M 降至 ~3 M（默认 r=8），单卡显存大幅下降
+- 学习率默认 `2e-4`（比 Stage 2 大 10×），因为 LoRA 中 B 矩阵初始化为 0，需要更大步长起步
+- Checkpoint 只保存 LoRA 权重（通过 `get_peft_model_state_dict` 抽取）和可选的 Projection，体积几十 MB 而非 1.2 GB，具备可插拔、多 adapter 切换的能力
+- 流程图参见 `docs/stage3.svg`
+
+#### Stage 3 自定义数据集
+
+脚本目前复用 `CogVLMSFTDataset` 作为 demo；也可以替换为自定义数据集以体现 LoRA 的"风格化 / 领域化适配"价值。自定义 `Dataset` 满足以下约定即可直接替换：
+
+```python
+from torch.utils.data import Dataset
+
+class MyStyleDataset(Dataset):
+    """自定义风格化/领域化数据集示例。
+
+    每个样本需返回:
+      {
+        'image':         经过 IMAGE_TRANSFORM 的张量 [3, 224, 224],
+        'conversations': [{'role': 'user'/'assistant', 'content': str}, ...]
+      }
+    """
+    def __init__(self, ..., transform=None): ...
+    def __len__(self): ...
+    def __getitem__(self, idx): ...
+```
+
+替换步骤：
+
+1. 将 `train_stage3_lora.py` 里 `from dataset import CogVLMSFTDataset` 改为 `from dataset import MyStyleDataset`
+2. 将 `train_dataset = CogVLMSFTDataset(...)` / `eval_dataset = ...` 两处构造改为 `MyStyleDataset(...)`
+3. 如果你的数据集不支持 `split='train'/'eval'` 参数划分，可以改用 `torch.utils.data.random_split`
+
+数据准备建议：
+
+- **规模**：几千到几万条，针对性强，比大数据集更容易看到效果
+- **风格**：一致的语气（例如更礼貌、更简短、更幽默）、一致的回答结构（例如总分总）、一致的领域术语（医学 / 法律 / 电商 / ...）
+- **格式**：每条样本包含 1~3 轮对话，总 token 数 ≤ 512
+
+### `eval_llava.py` — Stage 1/2 交互式评估
+
+- 加载训练好的投影层权重或完整模型权重，支持多轮图文对话
 - 输入图片 URL 加载图片，输入文本进行问答
 
 ```bash
+# Stage 1: 仅 projection
 python eval_llava.py --checkpoint checkpoints/stage1_projection.pt
+
+# Stage 2: 完整模型
+python eval_llava.py --llava_path checkpoints/<run_tag>/stage2_llava.pt
+```
+
+### `eval_llava_lora.py` — Stage 3 (LoRA) 交互式评估
+
+- 专用于 Stage 3：按顺序加载 **Stage 2 基座 → 注入 LoRA 结构 → 加载 LoRA 权重 →（可选）覆盖 Projection**
+- 推理时 LoRA 结构参数（`--lora_r / --lora_alpha / --lora_target`）必须与训练时一致，否则权重形状不匹配
+- 原有 `eval_llava.py` 功能不受影响
+
+```bash
+# 训练时 Projection 也更新
+python eval_llava_lora.py \
+    --stage2_path     checkpoints/<s2_tag>/stage2_llava.pt \
+    --lora_path       checkpoints/<s3_tag>/lora_final.pt \
+    --projection_path checkpoints/<s3_tag>/projection_final.pt
+
+# 训练时 --no_train_projection，沿用 Stage 2 的 Projection
+python eval_llava_lora.py \
+    --stage2_path checkpoints/<s2_tag>/stage2_llava.pt \
+    --lora_path   checkpoints/<s3_tag>/lora_final.pt
 ```
 
 ## 辅助脚本

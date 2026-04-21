@@ -1,0 +1,445 @@
+# Stage3: LoRA Parameter-Efficient Finetuning (参数高效微调)
+# 冻结 CLIP + LLM 原始权重，仅训练 LoRA 低秩旁路 + (可选) Projection
+
+direction: down
+
+title: {
+  label: "Stage3: LoRA 参数高效微调流程"
+  style: {
+    font-size: 28
+    bold: true
+    underline: true
+  }
+}
+
+# ============================================================
+# 数据加载（当前复用 Stage 2 的 CogVLM-SFT，实际应替换为风格化/领域化数据集）
+# ============================================================
+data: {
+  label: "数据加载"
+  style: {
+    fill: "#E3F2FD"
+    stroke: "#1565C0"
+    border-radius: 8
+    font-size: 18
+    bold: true
+  }
+
+  source: {
+    label: "demo: CogVLM-SFT-311K\n实际: 自定义风格化/领域化数据集"
+    shape: cylinder
+    style.fill: "#BBDEFB"
+  }
+
+  sample: {
+    label: "Dataset.__getitem__\n→ {image, conversations}"
+    shape: rectangle
+    style.fill: "#E3F2FD"
+  }
+
+  source -> sample
+}
+
+# ============================================================
+# 图像 + 文本预处理（与 Stage 2 完全一致）
+# ============================================================
+preprocess: {
+  label: "数据预处理 (与 Stage 2 相同)"
+  style: {
+    fill: "#FFF3E0"
+    stroke: "#E65100"
+    border-radius: 8
+    font-size: 16
+    bold: true
+  }
+
+  img: {
+    label: "图像: Resize + CenterCrop\n+ ToTensor + Normalize\n→ pixel_values [B,3,224,224]"
+    shape: rectangle
+    style.fill: "#FFE0B2"
+  }
+
+  txt: {
+    label: "文本: build_conversation_ids\n逐轮增量编码 + user 掩码\n→ input_ids, labels [B,T]"
+    shape: rectangle
+    style.fill: "#FFE0B2"
+  }
+}
+
+# ============================================================
+# 模型加载 (核心差异)
+# ============================================================
+model_init: {
+  label: "模型初始化（Stage 3 的核心差异）"
+  style: {
+    fill: "#E0F2F1"
+    stroke: "#004D40"
+    border-radius: 8
+    font-size: 18
+    bold: true
+  }
+
+  load_base: {
+    label: "Step 1: 构造空壳\nLlavaForCausalLM\n(CLIP + 随机 Projection + Qwen3)"
+    shape: rectangle
+    style.fill: "#B2DFDB"
+  }
+
+  load_s2: {
+    label: "Step 2: 加载 Stage 2 完整权重\nstage2_llava.pt\n→ model.load_state_dict(..., strict=False)"
+    shape: cylinder
+    style: {
+      fill: "#80CBC4"
+      stroke: "#004D40"
+      font-size: 14
+      bold: true
+    }
+  }
+
+  inject: {
+    label: "Step 3: 原地注入 LoRA\npeft.inject_adapter_in_model()\n把 {q,k,v,o}_proj 替换为 LoraLinear\n(注意: 顺序必须在 load_state_dict 之后)"
+    shape: rectangle
+    style: {
+      fill: "#4DB6AC"
+      stroke: "#004D40"
+      stroke-width: 3
+      bold: true
+    }
+  }
+
+  freeze: {
+    label: "Step 4: 冻结策略\nCLIP:       requires_grad=False ❄️\nLLM 原权重: requires_grad=False ❄️\nLoRA (A,B): requires_grad=True  🔥\nProjection: 可选 (默认 True) 🔥"
+    shape: rectangle
+    style: {
+      fill: "#B2DFDB"
+      stroke: "#004D40"
+      stroke-width: 2
+    }
+  }
+
+  load_base -> load_s2 -> inject -> freeze
+}
+
+# ============================================================
+# LoRA 原理说明
+# ============================================================
+lora_principle: {
+  label: "LoRA 原理"
+  style: {
+    fill: "#F3E5F5"
+    stroke: "#6A1B9A"
+    border-radius: 8
+    font-size: 16
+    bold: true
+  }
+
+  formula: {
+    label: ||md
+      **原始 Linear**:
+      h = W · x     (W: d_out × d_in, 冻结)
+
+      **LoRA 并联旁路**:
+      h = W · x + (α/r) · B · (A · x)
+
+      其中:
+      - A: r × d_in   (Kaiming 初始化)
+      - B: d_out × r  (初始化为 0, 保证开训时 h 不变)
+      - r << d_in, d_out
+      - 参数量 = r × (d_in + d_out), 约为原 Linear 的 1~2%
+    ||
+    style: {
+      fill: "#E1BEE7"
+      font-size: 13
+    }
+  }
+}
+
+# ============================================================
+# 模型前向传播
+# ============================================================
+forward: {
+  label: "模型前向传播"
+  style: {
+    fill: "#E8F5E9"
+    stroke: "#1B5E20"
+    border-radius: 8
+    font-size: 18
+    bold: true
+  }
+
+  clip: {
+    label: "CLIPVisionTower\n(冻结 ❄️)"
+    shape: rectangle
+    style: {
+      fill: "#C8E6C9"
+      stroke: "#2E7D32"
+      stroke-dash: 5
+    }
+  }
+
+  projection: {
+    label: "MultimodalProjection\n(可选 🔥, 默认训练)"
+    shape: rectangle
+    style: {
+      fill: "#FF8A65"
+      stroke: "#BF360C"
+    }
+  }
+
+  embed_tokens: {
+    label: "llm.embed_tokens\n(冻结 ❄️)"
+    shape: rectangle
+    style: {
+      fill: "#C8E6C9"
+      stroke: "#2E7D32"
+      stroke-dash: 5
+    }
+  }
+
+  concat_embeds: {
+    label: "Concat\n[visual, text]"
+    shape: diamond
+    style: {
+      fill: "#DCEDC8"
+      stroke: "#33691E"
+    }
+  }
+
+  llm: {
+    label: "Qwen3-0.6B\n原权重冻结 ❄️ + LoRA 旁路 🔥\nq_proj / k_proj / v_proj / o_proj\n分别并联 (B · A) 低秩旁路"
+    shape: rectangle
+    style: {
+      fill: "#FFAB91"
+      stroke: "#BF360C"
+      stroke-width: 3
+    }
+  }
+
+  loss: {
+    label: "CrossEntropy Loss\n(仅 Assistant 回复部分)"
+    shape: parallelogram
+    style: {
+      fill: "#FFCDD2"
+      stroke: "#B71C1C"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  clip -> projection -> concat_embeds
+  embed_tokens -> concat_embeds
+  concat_embeds -> llm -> loss
+}
+
+# ============================================================
+# 训练循环
+# ============================================================
+training: {
+  label: "训练循环"
+  style: {
+    fill: "#FFF9C4"
+    stroke: "#F57F17"
+    border-radius: 8
+    font-size: 18
+    bold: true
+  }
+
+  autocast: {
+    label: "autocast(bf16)\n混合精度前向"
+    style.fill: "#FFF59D"
+  }
+
+  backward: {
+    label: "loss.backward()\n梯度仅流向 LoRA (+ Projection)"
+    style.fill: "#FFF59D"
+  }
+
+  grad_clip: {
+    label: "clip_grad_norm_\n(max_norm=1.0)"
+    style.fill: "#FFF59D"
+  }
+
+  optimizer: {
+    label: "AdamW.step()\nlr=2e-4 (比 Stage 2 大 10×)\n因为 LoRA 初始化 B=0 需大步长"
+    style.fill: "#FFF59D"
+  }
+
+  scheduler: {
+    label: "CosineScheduler.step()\n(warmup 3%)"
+    style.fill: "#FFF59D"
+  }
+
+  autocast -> backward -> grad_clip -> optimizer -> scheduler
+}
+
+# ============================================================
+# 保存策略（核心差异）
+# ============================================================
+saving: {
+  label: "保存策略（核心差异）"
+  style: {
+    fill: "#FCE4EC"
+    stroke: "#880E4F"
+    border-radius: 8
+    font-size: 18
+    bold: true
+  }
+
+  extract: {
+    label: "get_peft_model_state_dict(llm)\n仅提取 lora_A / lora_B 权重\n不保存原 Linear 的 W"
+    shape: rectangle
+    style.fill: "#F8BBD0"
+  }
+
+  save_lora: {
+    label: "lora_{step}.pt\n(约几十 MB, 可插拔)"
+    shape: cylinder
+    style: {
+      fill: "#F48FB1"
+      stroke: "#880E4F"
+      bold: true
+    }
+  }
+
+  save_proj: {
+    label: "projection_{step}.pt\n(约 4 MB, 可选)"
+    shape: cylinder
+    style.fill: "#F8BBD0"
+  }
+
+  extract -> save_lora
+  extract -> save_proj: "若训练 Projection"
+}
+
+# ============================================================
+# 推理时权重加载（eval_llava_lora.py）
+# ============================================================
+inference: {
+  label: "推理加载顺序 (eval_llava_lora.py)"
+  style: {
+    fill: "#E0F7FA"
+    stroke: "#006064"
+    border-radius: 8
+    font-size: 16
+    bold: true
+  }
+
+  step1: {
+    label: "① 构造空壳\nLlavaForCausalLM"
+    style.fill: "#B2EBF2"
+  }
+
+  step2: {
+    label: "② 加载 stage2_llava.pt\n基座模型就位"
+    style.fill: "#B2EBF2"
+  }
+
+  step3: {
+    label: "③ 注入 LoRA 结构\n(r / α / targets 与训练一致)"
+    style.fill: "#B2EBF2"
+  }
+
+  step4: {
+    label: "④ 加载 lora_final.pt\nset_peft_model_state_dict"
+    style.fill: "#80DEEA"
+  }
+
+  step5: {
+    label: "⑤ (可选) 加载 projection_final.pt"
+    style.fill: "#B2EBF2"
+  }
+
+  step1 -> step2 -> step3 -> step4 -> step5
+}
+
+# ============================================================
+# Stage 2 vs Stage 3 对比
+# ============================================================
+comparison: {
+  label: "Stage 2 vs Stage 3 核心对比"
+  style: {
+    fill: "#FBE9E7"
+    stroke: "#BF360C"
+    border-radius: 8
+    font-size: 16
+    bold: true
+  }
+
+  diff: {
+    label: ||md
+      | 维度 | Stage 2 (全参数) | Stage 3 (LoRA) |
+      |------|------------------|----------------|
+      | 起点 | Stage 1 projection | Stage 2 完整权重 |
+      | 可训练 | Projection + LLM (~600M) | LoRA + Projection (~3M) |
+      | 学习率 | 2e-5 | 2e-4 (大 10×) |
+      | Batch size | 4 | 8 (显存省可翻倍) |
+      | 梯度检查点 | 开启 | 默认关闭 |
+      | 保存大小 | ~1.2 GB | ~几十 MB |
+      | 应用场景 | 学会对话 | 适配特定风格/领域 |
+      | 插拔性 | 不可 | 可多 adapter 切换 |
+    ||
+    style: {
+      fill: "#FFCCBC"
+      font-size: 12
+    }
+  }
+}
+
+# ============================================================
+# 主流程连接
+# ============================================================
+data.sample -> preprocess.img: "PIL Image" {
+  style.stroke: "#E65100"
+}
+data.sample -> preprocess.txt: "conversations" {
+  style.stroke: "#6A1B9A"
+}
+
+model_init.freeze -> forward.clip: "模型就绪" {
+  style: {
+    stroke: "#004D40"
+    stroke-width: 2
+  }
+}
+
+preprocess.img -> forward.clip: "pixel_values" {
+  style.stroke: "#E65100"
+}
+preprocess.txt -> forward.embed_tokens: "input_ids" {
+  style.stroke: "#6A1B9A"
+}
+preprocess.txt -> forward.loss: "labels" {
+  style: {
+    stroke: "#FF6F00"
+    stroke-dash: 3
+  }
+}
+
+forward.loss -> training.autocast: "loss" {
+  style: {
+    stroke: "#B71C1C"
+    stroke-width: 2
+  }
+}
+
+training.scheduler -> forward.clip: "下一个 batch" {
+  style: {
+    stroke: "#F57F17"
+    stroke-dash: 5
+  }
+}
+
+training.scheduler -> saving.extract: "定期 / 训练结束" {
+  style: {
+    stroke: "#880E4F"
+    stroke-dash: 5
+  }
+}
+
+saving.save_lora -> inference.step4: "推理时加载" {
+  style: {
+    stroke: "#006064"
+    stroke-width: 2
+    stroke-dash: 5
+  }
+}
